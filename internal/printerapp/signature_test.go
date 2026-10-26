@@ -18,7 +18,7 @@ func TestVerifiedImageUsesEachFamiliesOwnWorkflow(t *testing.T) {
 	for _, family := range Families() {
 		t.Run(family.ID, func(t *testing.T) {
 			runCosign = func(_ context.Context, args ...string) ([]byte, error) {
-				want := []string{"verify", "--output=json", "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", "--certificate-identity-regexp", `^https://github\.com/projectbluefin/` + family.ID + `-printer-app/\.github/workflows/registry-actions\.yml@refs/heads/[^/]+$`, family.Image}
+				want := []string{"verify", "--output=json", "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", "--certificate-identity-regexp", `^https://github\.com/projectbluefin/` + family.ID + `-printer-app/\.github/workflows/registry-actions\.yml@refs/heads/main$`, family.Image}
 				if !reflect.DeepEqual(args, want) {
 					t.Fatalf("cosign args = %q, want %q", args, want)
 				}

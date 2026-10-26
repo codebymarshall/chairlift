@@ -708,7 +708,12 @@ An agent must not break these:
   checked; Full Desktop Suite defaults unchecked), installed casks and
   explicitly requested formulae next, then the Brewfile exporter (also gated
   by `brew_group`). No Flatpak inventory, external catalog launcher, or package
-  search belongs here. Installed-package refreshes use
+  search belongs here. Expanding a collection loads formula/cask descriptions
+  once, off-thread, with a shared read timeout and cancellation on row destruction.
+  Missing metadata keeps the package name/type and reports Description unavailable;
+  a failed batch is retried per name so one unresolvable entry does not blank the rest.
+  Other package managers currently have no description lookup and show the type only.
+  Installed-package refreshes use
   `actionstate.RefreshGate` generations; stale workers must not replace newer rows.
   Installed formula/cask rows likewise confirm uninstall, formula rows confirm
   pin/unpin, and every row shares one gate across its mutation controls so
@@ -776,8 +781,11 @@ An agent must not break these:
   Mode defaults to nsl (an Ubuntu machine inside systemd-vmspawn and
   QEMU/KVM) with Lima (Ubuntu LTS VM) as an alternative backend, both with an
   explicit `/dev/kvm` permission floor; the fixed `kvm-enable` action grants
-  access to the invoking account, effective after a new login. nsl's managed
-  machine is `ubuntu`, or the `debian` machine an older ChairLift created
+  access to the invoking account, effective for `/dev/kvm` after a new login.
+  nsl also requires the account to belong to the `kvm` group (account
+  database, as nsl checks) even when the device is writable; that grant needs
+  no new login. nsl's managed machine is `ubuntu`, or the `debian`
+  machine an older ChairLift created
   (`devtools.ParseNSLList`); WSL Mode reports, starts, and probes that one,
   creates `ubuntu` only when neither exists (never a second machine), and turns
   off with `nsl stop <machine>` on that machine only, which keeps data
@@ -1191,7 +1199,10 @@ An agent must not break these:
   went with the catalog change. The panel catalog's *default* depends on the
   booted image: `DefaultFoundationID` returns the Open Gaming Collective's
   mark when `imageinfo.Info.IsGaming()` is true, because that is whose work
-  the gaming images ship. It is applied in `resolveID` at load, so switching
+  the gaming images ship. The schema stores an empty `panel-foundation`
+  default so `resolveID` can choose by image; a concrete schema default would mask that fallback.
+  This chooses the mark in the picker; `panel-enabled` remains opt-in.
+  It is applied in `resolveID` at load, so switching
   images adopts the new default without overwriting a selection the user made
   — `TestADeliberateSelectionSurvivesOnAGamingImage` holds that distinction.
   Whether this branding should be an org-wide convention rather than one
@@ -1400,6 +1411,13 @@ An agent must not break these:
   walkthrough check is referential, not pixel-based, so a title-bar change means
   regenerating `docs/screenshots/` deliberately, from the E2E job's
   `walkthrough-screenshots` artifact with the capture byproducts stripped.
+
+- **Wallpaper collections belong to Livery.** `livery_page.wallpapers_group`
+  discovers the external `artwork.Brewfile` through Apps bundle paths, without
+  depending on Apps widgets. Apps excludes artwork but retains other collection
+  owners. Opening/refreshing never installs; explicit actions share the bundle
+  install gate, invalidate old status generations, and refresh inventories only
+  on live success. The pure `internal/livery` backend stays Homebrew-free.
 
 ## Documentation
 

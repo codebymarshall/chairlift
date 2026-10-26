@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -344,6 +345,38 @@ func KVMAvailable() (exists, accessible bool) {
 	return true, true
 }
 
+// NSLKVMGroupMember checks the invoking account's groups in the account
+// database, as nsl's prerequisite check does; nsl starts its VM through the kvm
+// group, so a grant counts without a new login. /dev/kvm may be writable
+// without kvm group membership.
+func NSLKVMGroupMember() (bool, error) {
+	group, err := exec.Command("getent", "group", "kvm").Output()
+	if err != nil {
+		return false, fmt.Errorf("look up kvm group: %w", err)
+	}
+	fields := strings.Split(strings.TrimSpace(string(group)), ":")
+	if len(fields) != 4 || fields[0] != "kvm" || fields[2] == "" {
+		return false, errors.New("invalid kvm group entry")
+	}
+	account, err := user.Current()
+	if err != nil {
+		return false, fmt.Errorf("look up current user: %w", err)
+	}
+	ids, err := exec.Command("id", "-G", "--", account.Username).Output()
+	if err != nil {
+		return false, fmt.Errorf("read account groups: %w", err)
+	}
+	for _, id := range strings.Fields(string(ids)) {
+		if id == fields[2] {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+var nslKVMAvailable = KVMAvailable
+var nslEnableKVMAccess = ublue.EnableKVMAccess
+
 // SetWSL enables or disables WSL Mode for the specified backend.
 func SetWSL(ctx context.Context, backend string, enabled bool, progress func(string)) error {
 	if backend == BackendLima {
@@ -370,16 +403,35 @@ func setNSL(ctx context.Context, enabled bool, progress func(string)) error {
 		if !NSLHostSupported() {
 			return errors.New("nsl requires a Linux x86_64 host")
 		}
-		exists, accessible := KVMAvailable()
+		exists, accessible := nslKVMAvailable()
 		if !exists {
 			return errors.New("hardware virtualization is unavailable: /dev/kvm is missing; enable it in firmware")
 		}
-		if !accessible {
-			stage("Asking for virtual machine access…")
-			if err := ublue.EnableKVMAccess(ctx); err != nil {
+		member := false
+		if accessible {
+			var err error
+			member, err = NSLKVMGroupMember()
+			if err != nil {
 				return err
 			}
-			return ErrNewLogin
+		}
+		if !accessible || !member {
+			stage("Asking for virtual machine access…")
+			if err := nslEnableKVMAccess(ctx); err != nil {
+				return err
+			}
+			// Only device access waits for a new login; nsl reads kvm
+			// membership from the account database.
+			if !accessible {
+				return ErrNewLogin
+			}
+			member, err := NSLKVMGroupMember()
+			if err != nil {
+				return err
+			}
+			if !member {
+				return errors.New("virtual machine access was not granted to this account")
+			}
 		}
 		if !NSLInstalled() {
 			name, cask := WSLPackage(BackendNSL)

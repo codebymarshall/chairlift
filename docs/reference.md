@@ -109,7 +109,7 @@ accepted and ignored for compatibility, as described in [CONFIG.md](../CONFIG.md
   collapsed, but same-named files in different directories remain separate.
 
 Row text is resolved by `internal/views/bundleview`'s `Describe`, not taken
-from the file: the curated collections Bluefin ships (`artwork`, `cli`, `fonts`,
+from the file: the curated collections Bluefin ships (`cli`, `fonts`,
 `fonts-dev`, `ai-tools`, `full-desktop`) have user-facing titles and descriptions
 written here. Retired collections (`cncf`, `swift`, etc.) are filtered out, while
 administrator-added collections remain visible. Each row also states how many apps
@@ -164,8 +164,10 @@ developer access. Turning WSL or Docker off does not demote Developer Mode,
 and dry-run previews leave observed switches unchanged. Direct and implicit
 promotions share the same post-enable work and configuration opt-ins.
 nsl needs an x86-64 Linux host; Lima supports amd64 and arm64. Both require
-hardware virtualization and `/dev/kvm` access, whose fixed `kvm-enable`
-grant may also require authentication and a new login.
+hardware virtualization and `/dev/kvm` access. nsl also requires your account
+to belong to the `kvm` group, even when `/dev/kvm` is writable without it.
+Granting `/dev/kvm` access requires a new login; adding only `kvm` group
+membership does not.
 **Enable Docker** uses the image's native Docker CE system service and socket.
 Its expander names `containerd.io`, `docker-buildx-plugin`, `docker-ce`,
 `docker-ce-cli`, and `docker-compose-plugin` as **Provided by system image**,
@@ -199,7 +201,6 @@ is checked against installed extension IDs, not trusted by itself. Missing
 native `code` or an editor failure does not reverse access. Failed optional
 stages can be retried without repeating a completed privileged enable. Preview
 writes no settings or marker and launches no editor CLI.
-
 A confirmed Developer Mode enable also installs the Dev Container CLI
 (`devcontainer`) when Homebrew is available; an install failure does not reverse
 developer access. Editor selection/installation remains in Bazaar or Apps.
@@ -235,6 +236,7 @@ authorization rule.
 
 | Group | Key | Description |
 |-------|-----|-------------|
+| Wallpapers | `wallpapers_group` | Curated wallpaper collections discovered from the external `artwork.Brewfile`; actual contents and Installed, Update Available, Not Installed or Indeterminate status; explicit Install/Update only |
 | Profile Picture | `account_group` | The account's picture, chosen from Project Bluefin's dinosaur artwork bundled with the application, set only on Apply through AccountsService with a face-file fallback |
 | App Launcher Icon | `livery_app_grid_group` | The Show Applications mark on GNOME, or the configured Kickoff applets on KDE Plasma; fetched from simpleicons.org by brand name and set once, never rotated. On Plasma, the group is unavailable when no Kickoff applet is configured |
 | Top Bar Icon | `livery_foundation_group` | The GNOME top-bar menu mark, optionally advancing at each login; needs a GNOME session with the Custom Command Menu extension (omitted on Plasma) |
@@ -353,3 +355,13 @@ maintenance_page:
 
 All other groups remain enabled by default since they are not listed (except
 `maintenance_cleanup_group` and `reset_group`, which default to disabled).
+
+The Livery Wallpapers group owns `artwork.Brewfile`; Apps omits that collection
+and retains its other collection owners, including standalone slideshow tools.
+The configured Apps bundle directories supply discovery even when Apps inventory
+or collections are disabled. Missing Homebrew or a missing/unreadable manifest
+omits the package group without affecting profile or icon controls. Capability
+reasons are available in Help. Check failures display Indeterminate and remain
+retryable. Failed installs and dry-run previews preserve the last observation;
+a confirmed live success refreshes collection states and constructed Homebrew
+inventories. The pure `internal/livery` backend does not import Homebrew.

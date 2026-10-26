@@ -46,7 +46,7 @@ func verifiedImage(ctx context.Context, family Family) (string, error) {
 	if repository == "" || strings.ContainsAny(image, "\r\n\t ") || strings.HasPrefix(image, "-") {
 		return "", fmt.Errorf("%w: invalid image reference", ErrSignatureUnverified)
 	}
-	identity := `^https://github\.com/projectbluefin/` + family.ID + `-printer-app/\.github/workflows/registry-actions\.yml@refs/heads/[^/]+$`
+	identity := `^https://github\.com/projectbluefin/` + family.ID + `-printer-app/\.github/workflows/registry-actions\.yml@refs/heads/main$`
 	output, err := runCosign(ctx, "verify", "--output=json", "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", "--certificate-identity-regexp", identity, image)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrSignatureUnverified, err)

@@ -215,8 +215,9 @@ Once developer access is granted, a later WSL or Docker failure leaves it
 granted; retry the child action after fixing its reported requirement.
 Turning either child off does not turn Developer Mode off. Preview mode
 changes none of the observed switch states.
-WSL also needs hardware virtualization and access to `/dev/kvm`; its KVM
-permission grant may ask for authentication and requires a new login.
+WSL also needs hardware virtualization and access to `/dev/kvm`; nsl also needs
+membership in the `kvm` group. Granting `/dev/kvm` access requires a new login;
+adding only `kvm` group membership does not.
 Docker uses the system's existing Docker CE installation. Its expanded package
 list labels `containerd.io`, `docker-buildx-plugin`, `docker-ce`, `docker-ce-cli`,
 and `docker-compose-plugin` as **Provided by system image**, not downloads this
@@ -241,7 +242,8 @@ than trusting that marker alone. Missing native VS Code or an editor setup error
 stays retryable without undoing Docker or developer access. Preview writes no
 settings or marker and launches no editor CLI.
 Use **Virtual Machine Engine** to choose the built-in engine or Lima;
-both run Ubuntu. An existing Lima Ubuntu machine is kept as the choice when no
+both run Ubuntu. An external documentation button beside the chooser opens the
+engine's documentation. An existing Lima Ubuntu machine is kept as the choice when no
 built-in machine exists, rather than creating a second one. Likewise, a Debian
 machine the built-in engine made in an earlier release keeps being used, and
 the chooser says so, instead of an Ubuntu machine being created beside it.
@@ -429,3 +431,11 @@ commit with `make screenshots` and commits any changed PNGs to its branch;
 the push re-runs CI. It runs on request rather than per push for the same
 drift reason, and handles branches in this repository only. `make ci` checks
 that every page and configurable group has a screenshot and an entry here.
+
+Within Livery, **Wallpapers** appears when Homebrew and the configured external
+wallpaper collection are available. Expand **Wallpaper Collections** to inspect
+its actual packages. Its subtitle reports Installed, Update Available,
+Not Installed or Indeterminate; choose **Install** or **Update** explicitly.
+Opening the page never installs anything. A preview restores the action and
+keeps the observed status. Other Livery controls remain available when the
+collection is absent. Wallpaper packages are managed here rather than in Apps.

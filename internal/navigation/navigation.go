@@ -23,6 +23,11 @@ const helpRouteName = "help"
 // surface, and a rename can never drift the two apart.
 const AgentModeRoute = "agents"
 
+// DXModeRoute is the canonical sidebar route the --dx-mode launch intent opens.
+// internal/app resolves the launch decision through this constant, so the launch
+// intent and the sidebar row navigate the same surface.
+const DXModeRoute = "features"
+
 // Kind classifies a route by the way a user enters it.
 type Kind string
 
@@ -181,6 +186,7 @@ var routes = []Item{
 			"livery_app_grid_group",
 			"livery_foundation_group",
 			"livery_dock_group",
+			"wallpapers_group",
 		),
 	},
 	{

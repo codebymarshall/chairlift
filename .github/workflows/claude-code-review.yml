@@ -1,4 +1,6 @@
 name: Claude code review
+# Maintainer-triggered, read-only review. Usage and the ANTHROPIC_API_KEY
+# requirement are documented in docs/quality.md.
 
 on:
   workflow_dispatch:

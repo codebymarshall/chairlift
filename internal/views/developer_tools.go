@@ -168,6 +168,15 @@ func (uh *UserHome) refreshDeveloperOptions(status ublue.Status) {
 		}
 		docker, dockerErr := devtools.DockerStatus(ctx)
 		kvmExists, kvmAccess := devtools.KVMAvailable()
+		var nslGroupErr error
+		if backend == devtools.BackendNSL && kvmExists {
+			member, err := devtools.NSLKVMGroupMember()
+			if err != nil {
+				log.Printf("views: nsl group check failed: %v", err)
+			}
+			nslGroupErr = err
+			kvmAccess = kvmAccess && err == nil && member
+		}
 		sgtk.RunOnMainThread(func() {
 			defer uh.developerGate.Reset()
 			if resolve {
@@ -248,6 +257,11 @@ func (uh *UserHome) refreshDeveloperOptions(status ublue.Status) {
 							item.allowed = false
 							item.toggle.set(item.active)
 							item.row.SetSubtitle(actionable)
+						} else if nslGroupErr != nil {
+							item.canEnable = false
+							item.allowed = false
+							item.toggle.set(item.active)
+							item.row.SetSubtitle(devtools.NeedsPrerequisite)
 						} else if !kvmAccess {
 							item.canEnable = status.Supports(ubluehelper.CommandKVMEnable)
 							item.allowed = item.canEnable
@@ -304,13 +318,13 @@ func wslSubtitle(backend string, state devtools.WSLState, err error) string {
 		case err != nil:
 			return "Couldn't check the Ubuntu virtual machine."
 		case state.Ready:
-			return "Ubuntu is ready. In your editor, connect with Remote SSH to lima-ubuntu."
+			return "Ubuntu is ready in Lima. Run limactl shell ubuntu, or connect your editor over SSH to lima-ubuntu."
 		case state.Running:
 			return "Ubuntu is running but not ready yet."
 		case state.Exists:
 			return "Ubuntu is stopped. Your files are kept."
 		default:
-			return "Run Ubuntu in a virtual machine that shares your home folder. Downloads about 600 MB."
+			return "Run Ubuntu LTS in a Lima virtual machine with writable access to your home folder. Downloads about 600 MB. Open a terminal with limactl shell ubuntu."
 		}
 	}
 	switch {

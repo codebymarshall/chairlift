@@ -626,7 +626,8 @@ account, service, image or command argv. Privileged developer options stay
 visible when their installed actions are missing, with affected controls insensitive.
 WSL Mode defaults to nsl on Linux amd64, with Lima as an alternative backend;
 an existing Lima-only machine retains Lima. Both require accessible `/dev/kvm`;
-a new permission grant needs a new login.
+nsl also requires the account's `kvm` group membership. A new grant needs a
+new login only when `/dev/kvm` itself was not accessible.
 `dx-enable`, `kvm-enable` and `docker-enable` first copy a group that only the
 image's `/usr/lib/group` defines (nss-altfiles, as rpm-ostree composes ship
 them) into `/etc/group`, GID unchanged, because `usermod -aG` edits
@@ -1657,3 +1658,11 @@ Back and Next mutate no settings. **Finish** saves completed
 and version and returns to Control Center; a save failure reports an
 error toast. Intentional dismissal records a skip without
 demoting prior completion. Dry-run previews persistence. `0-setup.png` captures Welcome.
+
+Livery's optional `wallpapers_group` composes the external artwork collection
+with `internal/homebrew` at the view layer. Discovery reads the existing Apps
+bundle paths even if Apps widgets are unconstructed. Its rows and callbacks
+are constructed once; status requests use generation guards, and installation
+invalidates earlier observations through the shared bundle install gate.
+Only a successful live install refreshes inventories. The headless Livery
+backend and rotation retain no Homebrew dependency.

@@ -195,6 +195,7 @@ func TestPageMetadataCoversEveryBuilderBackedGroup(t *testing.T) {
 			"livery_app_grid_group",
 			"livery_foundation_group",
 			"livery_dock_group",
+			"wallpapers_group",
 		),
 		"maintenance": refsOn("maintenance_page",
 			"maintenance_cleanup_group",
@@ -567,6 +568,28 @@ func TestLaunchIntentTargetsACanonicalEnterableRoute(t *testing.T) {
 	}
 	if transition.Name != AgentModeRoute || transition.VisibleChild != AgentModeRoute {
 		t.Fatalf("Resolve(%q) = %#v, want it entered as a primary", AgentModeRoute, transition)
+	}
+}
+
+func TestDXModeLaunchIntentTargetsACanonicalEnterableRoute(t *testing.T) {
+	// The --dx-mode launch intent reaches the Features page (where the Developer Mode
+	// toggle resides) the same way the sidebar row does.
+	route := routeByName(t, DXModeRoute)
+	if !isPrimary(route) {
+		t.Fatalf("DXModeRoute %q is not a canonical primary", DXModeRoute)
+	}
+
+	routes := VisibleRoutes(everythingEnabled)
+	if !containsPage(routes, DXModeRoute) {
+		t.Fatalf("VisibleRoutes with everything enabled did not offer %q", DXModeRoute)
+	}
+
+	transition, ok := Resolve(DXModeRoute, routes, alwaysConstructed)
+	if !ok {
+		t.Fatalf("Resolve(%q) rejected the launch route", DXModeRoute)
+	}
+	if transition.Name != DXModeRoute || transition.VisibleChild != DXModeRoute {
+		t.Fatalf("Resolve(%q) = %#v, want it entered as a primary", DXModeRoute, transition)
 	}
 }
 

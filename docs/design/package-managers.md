@@ -286,8 +286,8 @@ whose title and subtitle are the curated name and description
 list. Collections are selected with checkboxes (curated sets default checked,
 while Full Desktop Suite defaults unchecked). An "Install" header action installs
 all checked, uninstalled collections in one step. Bluefin CLI additionally enables
-shell bling and prompt integration, while Extra Wallpapers bundles the Damask
-flatpak.
+shell bling and prompt integration. The `artwork` wallpaper collection is
+not an Apps row; Livery's Wallpapers group owns it.
 
 Each row's installed state is observed: `refreshBundleStatuses`
 (`internal/views/bundle_install.go`) runs `BundleCheck` for every collection
@@ -738,8 +738,12 @@ option and an in-session backend chooser. The first observation retains an
 existing Lima Ubuntu machine when no ChairLift nsl machine exists; it does not
 persist the chooser selection or silently migrate data. nsl requires Linux amd64;
 Lima supports Linux amd64 and arm64. Both require actual invoking-session
-`/dev/kvm` access; the fixed `kvm-enable` grant requires a new login before
-setup continues. nsl installs the `frostyard/tap/nsl` cask and runs `nsl doctor`.
+`/dev/kvm` access; nsl additionally requires the account's `kvm` group
+membership in the account database (as nsl's own check reads it), even when the
+device is writable. The fixed `kvm-enable` grant requires a new login before
+setup continues only when `/dev/kvm` was not accessible; a membership-only grant
+continues setup at once. nsl installs the
+`frostyard/tap/nsl` cask and runs `nsl doctor`.
 WSL Mode's nsl machine is `ubuntu`, or the `debian` machine an older ChairLift
 created (`devtools.ParseNSLList` prefers `ubuntu`; other machine names are the
 user's and are ignored). It creates an Ubuntu 26.04 machine (`ubuntu`) only when
@@ -1117,3 +1121,21 @@ make e2e-atspi
 For documentation reconciliation, compare the linked live owners and follow
 [documentation consistency](../documentation-consistency.md); source and
 configuration win over historical plans or frozen external parity lists.
+
+## Collection package descriptions
+
+Apps renders Brewfile entries immediately. On first expansion of a collection,
+`homebrew.DescribeBundleItems` batches formula and cask metadata through
+`brew info --json=v2`, sharing the read timeout across both commands. It does
+not install packages or grant tap trust, and `brew info` never auto-taps: names
+in untapped taps fail as unavailable rather than cloning the tap. Homebrew may
+fetch metadata; an offline or failed query leaves package names and types
+visible with “Description unavailable”. Because Homebrew emits no JSON when any
+one name in a batch is unresolvable, a failed batch is retried one name at a
+time under the same deadline so the resolvable entries keep their descriptions.
+The row owns cancellation and rejects publication after destruction.
+
+Full identifiers and formula aliases match the returned metadata; formula and
+cask namespaces remain separate. Option-like tokens, URLs and Ruby paths are
+excluded from metadata commands. Flatpak, App Store and VS Code entries show
+their package type only until their own metadata providers are implemented.

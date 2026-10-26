@@ -123,23 +123,6 @@ Feature: Apps destination
     And Homebrew was asked to "bundle check"
     And Homebrew was never asked to "bundle install"
 
-  @config.apps-bundles @stub.apps-brew-wallpapers-installed @stub.apps-collections
-  Scenario: A super-bundle reads Installed only when every member is installed
-    Given ChairLift is running
-    When I open the "Apps" page
-    Then the "Extra Wallpapers" row says "Includes 2 apps and tools. (Installed)"
-    And Homebrew was never asked to "bundle install"
-
-  @config.apps-bundles @stub.apps-brew-wallpapers-partly-installed @stub.apps-collections
-  Scenario: A super-bundle with a missing member stays offered
-    Given ChairLift is running
-    When I open the "Apps" page
-    Then the "Extra Wallpapers" row says "Includes 2 apps and tools."
-    And the "Team tools" row says "Tools our team relies on every day. Includes 1 app or tool. (Installed)"
-    And the "Extra Wallpapers" row does not say "(Installed)"
-    And the "Extra Wallpapers" collection is checked
-    And Homebrew was never asked to "bundle install"
-
   @config.apps-bundles @stub.apps-brew
   Scenario: A system with no app collections says none are offered
     Given ChairLift is running
@@ -190,13 +173,15 @@ Feature: Apps destination
     Then the "Team tools" list shows exactly
       | title |
       | just  |
-    And the "just" row says "Command-line tool"
+    And the "just" row says "Command-line tool · Save and run project commands"
+    And Homebrew was asked to "info --json=v2 --formula just"
     When I expand the "Monospace Fonts" list under "App Collections"
     Then the "Monospace Fonts" list shows exactly
       | title            |
       | font-fira-code   |
       | font-jetbrains-mono |
       | font-hack        |
+    And the "font-fira-code" row says "Command-line tool · Description unavailable"
 
   @config.apps-bundles @stub.apps-brew @stub.apps-collections
   Scenario: Collections install with the group Install button without expanding
@@ -207,3 +192,12 @@ Feature: Apps destination
     And the "Install" button in the "Install Selected Collections" row is sensitive
     And the Apps progress bar is hidden
     And the application log does not contain "panic"
+
+  @config.apps-bundles @stub.apps-brew-unreadable @stub.apps-collections
+  Scenario: Missing package descriptions leave collection contents usable
+    Given ChairLift is running
+    When I open the "Apps" page
+    And I expand the "Team tools" list under "App Collections"
+    Then the "just" row says "Command-line tool · Description unavailable"
+    And the "Install" button in the "Install Selected Collections" row is sensitive
+    And Homebrew was never asked to "bundle install"
