@@ -67,7 +67,7 @@ class AuthenticationAgent:
             os.close(ready)
         return self
 
-    def pump(self, cancel=False):
+    def pump(self, eof=False):
         if not select.select([self.terminal], [], [], 0.1)[0]:
             return False
         data = os.read(self.terminal, 4096)
@@ -79,17 +79,17 @@ class AuthenticationAgent:
             return False
         self.pending = self.pending[prompt.end():]
         self.prompts += 1
-        # EOF at the real password prompt exercises dismissal, not a fake exit.
-        os.write(self.terminal, b"\x04" if cancel else FIXTURE_PASSWORD)
+        # EOF uses the real agent; its observed exit may be refusal, not dismissal.
+        os.write(self.terminal, b"\x04" if eof else FIXTURE_PASSWORD)
         return True
 
-    def cancel(self):
+    def end_input(self):
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            if self.pump(cancel=True):
+            if self.pump(eof=True):
                 assert b"dx-enable" in self.transcript, self.transcript
                 return
-        raise AssertionError(f"real cancellation prompt missing: {self.transcript!r}")
+        raise AssertionError(f"real authentication prompt missing: {self.transcript!r}")
 
     def authenticate_until(self, done, timeout=120):
         # An inactive-session auth_admin action can prompt separately for both
@@ -205,6 +205,24 @@ def docker_request(path, payload=None):
     return body
 
 
+def assert_socket_stopped():
+    # systemd may retain the socket pathname after closing its listener.
+    # Probe from the new-group session, so permission denial cannot fake stop.
+    probe = """import errno, socket, sys
+try:
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(5)
+        connection.connect(sys.argv[1])
+except OSError as error:
+    if error.errno not in (errno.ENOENT, errno.ECONNREFUSED):
+        raise
+    print(f"Disabled system socket rejects connections: {error}")
+else:
+    raise AssertionError("disabled Docker still accepts socket connections")
+"""
+    run("sg", "docker", "-c", shlex.join([sys.executable, "-c", probe, str(SOCKET)]))
+
+
 def stop(process):
     if process.poll() is None:
         process.send_signal(signal.SIGTERM)
@@ -289,18 +307,34 @@ def main(binary, output):
         row = atspi.row_containing(group, title, timeout=1)
         return text in atspi.all_text_under(row)
 
+    def feedback_has(expected):
+        window = atspi.main_window(app)
+        if expected in atspi.all_text_under(window):
+            return True
+        # Onboarding can fail to open a browser in this headless fixture.
+        # Read and dismiss queued feedback as a person would; the requested
+        # editor failure must still appear, rather than assuming it is first.
+        for button in atspi.find_all(window, lambda node: atspi.is_button(node, "Dismiss") and atspi.showing(node)):
+            if atspi.role(button.parent) == "alert":
+                messages = atspi.all_text_under(button.parent)
+                if expected in messages:
+                    return True
+                print(f"Read queued feedback: {messages!r}", flush=True)
+                atspi.activate(button)
+        return False
+
     try:
         launch()
         assert atspi.poll(lambda: atspi.sensitive(toggle()) and not atspi.checked(toggle()) and INSTALLABLE in atspi.all_text_under(docker_row())), "inactive system Docker was not offered"
         assert atspi.poll(lambda: atspi.sensitive(developer_toggle()) and not atspi.checked(developer_toggle())), "fixture must start with Developer Mode off"
-        with AuthenticationAgent(subject, output / "auth-canceled.txt") as agent:
+        with AuthenticationAgent(subject, output / "auth-blocked.txt") as agent:
             atspi.activate(toggle())
-            agent.cancel()
-            assert atspi.poll(lambda: atspi.sensitive(toggle()) and not atspi.checked(toggle()) and atspi.sensitive(developer_toggle()) and not atspi.checked(developer_toggle()), timeout=45), "canceled promotion did not restore both controls"
+            agent.end_input()
+            assert atspi.poll(lambda: atspi.sensitive(toggle()) and not atspi.checked(toggle()) and atspi.sensitive(developer_toggle()) and not atspi.checked(developer_toggle()), timeout=45), "blocked promotion did not restore both controls"
         assert_helpers(journal, ["dx-enable"])
         assert_units("inactive")
-        assert not SOCKET.exists(), "canceled promotion activated Docker"
-        assert installed_files() == initial_files, "canceled authentication changed engine packages"
+        assert not SOCKET.exists(), "blocked promotion activated Docker"
+        assert installed_files() == initial_files, "blocked authentication changed engine packages"
         refusal = outcomes(journal)[0]
         if refusal.get("exit_code") == 127:
             assert refusal["outcome"] == "refused" and "Not authorized" in log_path.read_text(), refusal
@@ -309,7 +343,7 @@ def main(binary, output):
             assert refusal.get("exit_code") == 126 or "Request dismissed" in log_path.read_text(), refusal
             expected_status = "Canceled"
         assert atspi.poll(lambda: stage_has("Developer access", expected_status)), f"authentication refusal did not report {expected_status}"
-        wayland_remote.screenshot(str(output / "docker-auth-canceled.png"))
+        wayland_remote.screenshot(str(output / "docker-auth-blocked.png"))
 
         with AuthenticationAgent(subject, output / "auth-enabled.txt") as agent:
             atspi.activate(toggle())
@@ -319,7 +353,7 @@ def main(binary, output):
         assert atspi.poll(lambda: atspi.checked(toggle()) and atspi.sensitive(toggle()) and NEEDS_LOGIN in atspi.all_text_under(docker_row()), timeout=60), "new group grant was not shown as awaiting login"
         assert atspi.poll(lambda: stage_has("Verify readiness", "Awaiting new login")), "verification invented readiness for the old session"
         assert atspi.poll(lambda: stage_has("VS Code setup", "Failed")), "missing native code was not a separate optional failure"
-        assert atspi.poll(lambda: "Docker access is enabled, but VS Code setup couldn't finish. See the application log for details." in atspi.all_text_under(atspi.main_window(app))), "editor failure was hidden or mislabeled as Docker failure"
+        assert atspi.poll(lambda: feedback_has("Docker access is enabled, but VS Code setup couldn't finish. See the application log for details.")), "editor failure was hidden or mislabeled as Docker failure"
         assert_units("active")
         assert SOCKET.stat().st_uid == 0 and SOCKET.stat().st_gid == docker_gid, "socket is not system-owned Docker"
         assert_old_session_denied()
@@ -349,13 +383,14 @@ def main(binary, output):
             agent.authenticate_until(lambda: len(outcomes(journal)) == 4)
         assert atspi.poll(lambda: not atspi.checked(toggle()) and atspi.sensitive(toggle()) and INSTALLABLE in atspi.all_text_under(docker_row()), timeout=60), "GUI did not observe system Docker disable"
         assert_units("inactive")
-        assert not SOCKET.exists(), "Docker socket was not removed after disable"
+        assert_socket_stopped()
+        assert_units("inactive")  # A connection must not socket-activate Docker.
         assert installed_files() == initial_files, "disable changed installed packages or native units"
         assert atspi.checked(developer_toggle()) and atspi.sensitive(developer_toggle()), "Docker disable demoted Developer Mode"
         assert_helpers(journal, ["dx-enable", "dx-enable", "docker-enable", "docker-disable"])
         assert pwd.getpwuid(os.getuid()).pw_name in grp.getgrnam("docker").gr_mem, "disable removed account access"
         wayland_remote.screenshot(str(output / "docker-disabled.png"))
-        print("LIVE DOCKER PROOF: real auth cancellation blocks child -> dx-enable then docker-enable -> awaiting new login and separate missing-editor failure -> real sg login observes HTTP 200 system Docker -> disable retains packages, access and parent; root fixture verifies retained volume", flush=True)
+        print(f"LIVE DOCKER PROOF: auth {refusal['outcome']} (exit {refusal['exit_code']}, setup {expected_status}) blocks child -> dx-enable then docker-enable -> awaiting new login and separate missing-editor failure -> real sg login observes HTTP 200 system Docker -> disable retains packages, access and parent; root fixture verifies retained volume", flush=True)
     except BaseException:
         if app is not None:
             try:

@@ -156,8 +156,10 @@ Developer options include WSL Mode (an Ubuntu machine in systemd-vmspawn via
 nsl by default, or Ubuntu LTS in Lima). Turning WSL or Docker on while
 Developer Mode is off first runs the existing fixed
 `pkexec /usr/bin/chairlift-helper dx-enable` prerequisite. Authentication
-failure or cancellation aborts child setup. The Developer Mode switch is
-confirmed only after the helper succeeds; a later child failure keeps granted
+failure or cancellation aborts child setup. A refusal (exit 127, "Not authorized")
+is Failed, not Canceled; authentication cancellation requires exit 126 or
+"Request dismissed". The Developer Mode switch is confirmed only after the
+helper succeeds; a later child failure keeps granted
 developer access. Turning WSL or Docker off does not demote Developer Mode,
 and dry-run previews leave observed switches unchanged. Direct and implicit
 promotions share the same post-enable work and configuration opt-ins.

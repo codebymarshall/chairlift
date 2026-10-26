@@ -590,7 +590,10 @@ invocation records intent before dispatch, independent of dry-run and the
 `would_run` argv but starts no helper and emits no outcome. Live dispatch adds
 a separate outcome record: `succeeded`, `refused`, `failed`, `timed-out` or
 `cancelled`. Exit 126 and exit 127 without `Error accessing` classify as
-authentication refusal; an inaccessible helper at exit 127 is failure.
+authentication refusal; an inaccessible helper at exit 127 is failure. This
+journal category is not the UI cancellation classifier: exit 127 with "Not
+authorized" remains a Failed setup stage. Only exit 126 or "Request dismissed"
+denotes a dismissed PolicyKit prompt and a Canceled stage.
 
 `cmd/chairlift-helper` emits a JSON argv marker before each derived root
 command. The executor strips those markers from human-readable output and
@@ -809,10 +812,14 @@ failure, not a false Docker or Developer Mode failure.
 [`docker_system_test.go`](../../test/e2e/docker_system_test.go). The pinned Dakota
 fixture supplies real Docker binaries/system units before app launch, separately
 from ChairLift. It uses private native managers in rootless Podman's namespace
-and no host socket or bus. Its live assertions cover authentication ordering and
-cancellation, awaiting login, a new-group session's HTTP socket readiness and
-non-rootless daemon, and stop preserving packages/data/groups and Developer Mode.
-Dry-run AT-SPI scenarios and screenshots do not establish live readiness.
+and no host socket or bus. Its live assertions send EOF to a real prerequisite
+authentication prompt, preserving the actual journal outcome and exit code in
+the summary. Exit 127 with "Not authorized" proves refusal/Failed, not live
+cancellation; Canceled is asserted only for exit 126 or "Request dismissed".
+The gate also covers ordered authentication, awaiting login, a real `sg` new-group
+session's HTTP 200 socket readiness and non-rootless system daemon, and stop
+preserving packages/data/groups and Developer Mode. Dry-run AT-SPI scenarios and
+screenshots do not establish live readiness.
 
 [`internal/gaming`](../../internal/gaming/gaming.go) manages the gaming tools
 stack (ProtonPlus, Protontricks, GOverlay, MangoHud). Enable installs missing

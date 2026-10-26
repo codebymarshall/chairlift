@@ -116,12 +116,19 @@ The app builds pure-Go (`CGO_ENABLED=0`); the race detector needs CGO.
   Docker binaries and system units before ChairLift launches; this is fixture
   provisioning, not a ChairLift package install. Native system/user managers
   run inside rootless Podman; `--privileged` applies only to that namespace,
-  with no host Docker socket or user bus mounted. The gate covers canceled
-  prerequisite authentication, ordered `dx-enable` then `docker-enable`,
+  with no host Docker socket or user bus mounted. The gate sends EOF to a real
+  prerequisite authentication prompt and reports the actual outcome/exit code:
+  exit 127 with "Not authorized" is journaled as `refused` and shown as Failed,
+  not live cancellation coverage. Canceled requires exit 126 or "Request
+  dismissed". It also covers ordered `dx-enable` then `docker-enable`,
   awaiting-login feedback, a new-group session's system-socket readiness and
   non-rootless daemon, and disabling both units while retaining packages,
   data, account groups, and Developer Mode. Ordinary AT-SPI scenarios remain
   dry-run; neither those previews nor screenshots prove live Docker readiness.
+  `.github/workflows/docker-system.yml` runs this gate nightly and manually,
+  separately from the merge queue's required `Tests Passed` context. Its runner
+  loads normal kernel netfilter/overlay modules; missing prerequisites fail
+  rather than skip the gate or disable Docker firewalling.
 - **Every destination is driven through AT-SPI, on Dakota.** `make e2e-atspi`
   runs `TestATSPIBehaveSuite` — the behave + dogtail suite in
   `test/e2e/features/`, in projectbluefin/testsuite's shape — through

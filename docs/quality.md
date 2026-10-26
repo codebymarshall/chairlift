@@ -13,6 +13,7 @@ collects those read-only sources and their interpretation boundaries.
 |---|---|---|
 | Tests workflow | Latest lint, filtered unit tests, race detection, E2E, sharded AT-SPI, verification, and cross-architecture build results | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/test.yml) |
 | Nightly compliance | Daily full CI, E2E, and known-vulnerability scan results for the default branch | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/nightly-compliance.yml) |
+| Live system Docker | Nightly/manual real PolicyKit, system-daemon readiness, new-login, and retained-data checks in an isolated Dakota fixture | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/docker-system.yml) |
 | Prow | `/command` handling, `needs-kind`, reviewer assignment, label sync, and merge-queue entry on `lgtm` + `approved` | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/prow.yml) |
 | Pull request checks | Gate results attached to each proposed change, including reruns and logs | Open a pull request and select its **Checks** tab |
 | Claude code review | Maintainer-triggered, read-only AI review comments for a selected pull request | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/claude-code-review.yml) |
@@ -114,6 +115,18 @@ Third-party actions use full 40-character commit SHAs with reviewed version
 comments. Shared `projectbluefin/actions` production uses managed `@v1`. The
 workflow security scan enforces both the immutable third-party boundary and
 this constrained first-party authority.
+
+## Live system-Docker observation
+
+The independent [`Live system Docker` workflow](../.github/workflows/docker-system.yml)
+runs `make e2e-docker` nightly at 05:17 UTC and on manual dispatch. It is not a
+required merge-queue check. The runner supplies normal netfilter and overlay
+kernel modules; the daemon runs with its normal firewall policy inside rootless
+Podman's private namespace, using the pinned Dakota prerequisite image.
+Missing prerequisites fail the job rather than skip it. Only flat diagnostic
+logs, journals, JSON, and screenshots are uploaded; user homes, runtime sockets,
+and daemon data are excluded. Standard `make e2e` and dry-run AT-SPI results do
+not prove this live path.
 
 ## Release gating
 

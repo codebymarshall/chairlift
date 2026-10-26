@@ -209,7 +209,8 @@ Developer options also offer **WSL Mode** (nsl persistent Linux machines by
 default on x86-64 Linux, with Lima Ubuntu LTS as an alternative on amd64 or arm64)
 and **Enable Docker**. Turning either on first enables Developer Mode if it
 is off, using the same administrator authentication as its own switch. If
-authentication is canceled or fails, WSL or Docker setup does not start.
+authentication is canceled or fails, WSL or Docker setup does not start. Refused
+authorization is shown as Failed, not Canceled.
 Once developer access is granted, a later WSL or Docker failure leaves it
 granted; retry the child action after fixing its reported requirement.
 Turning either child off does not turn Developer Mode off. Preview mode
@@ -405,7 +406,11 @@ The capture session is not a booted OS-update target, and its system Docker
 units may be unavailable. A dry-run capture never installs, starts, or stops
 Docker. Live activation belongs to `make e2e-docker`
 (`TestIntegrationDockerSystem` in `test/e2e/docker_system_test.go`), not screenshot
-evidence. Capture needs podman and Go on the host.
+evidence. Its real authentication prompt receives EOF, and the summary reports
+the actual outcome and exit code: exit 127 with "Not authorized" proves refusal,
+not live cancellation. Only exit 126 or "Request dismissed" proves a dismissed
+prompt. Readiness still requires a real new-group session and HTTP 200 from the
+system daemon. Capture needs podman and Go on the host.
 
 Run it locally when something's appearance changes and you want to preview
 before a release. It isn't regenerated per commit, since font and theme
