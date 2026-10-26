@@ -923,9 +923,10 @@ An agent must not break these:
   Pulp is a system-scope Flatpak from system Flathub (an existing copy in
   either scope needs no install), authorized by Flatpak's own PolicyKit, not
   `pkexec`. Feed staging writes one catalog under `~/.local/share/chairlift`,
-  never Pulp's sandboxed store; report it as staged, not imported. Optional
-  outcomes are separate from already-granted developer access: their failure
-  rolls nothing back. Disabling Developer Mode removes neither Pulp, the
+  never Pulp's sandboxed store; report it as staged, not imported. Its disclosure
+  resolves `developerfeeds.OPMLPath` for manual import without writing on load.
+  Optional outcomes are separate from already-granted developer access; failures
+  roll nothing back. Disabling Developer Mode removes neither Pulp, the
   staged file, developer apps, nor anything the user imported. Marshal feedback
   through `sgtk.RunOnMainThread` with nil guards.
 - **Troubleshooting runs Goose in ChairLift's own profile, never the user's.**

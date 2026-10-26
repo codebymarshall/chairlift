@@ -72,6 +72,7 @@ Feature: Features page — Developer Mode, WSL Mode, Docker, Gaming Mode, and Pr
       | visual-studio-code                   |
       | io.podman_desktop.PodmanDesktop       |
     And the "Developer Mode" package disclosure is informational
+    And the developer feed disclosure shows its manual-import file location
     And expanding disclosures changes no Features switch and requests no mutation
     And the Developer feed onboarding never starts
 

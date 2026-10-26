@@ -163,6 +163,7 @@ func TestPostStagesRespectsPromotionPreviewAndOptIns(t *testing.T) {
 		{"apps unavailable", false, true, PostOptions{InstallApps: true}, nil},
 		{"apps available", false, true, PostOptions{Homebrew: true, InstallApps: true, Collections: true}, []Stage{Devcontainer, Apps}},
 		{"apps without Homebrew", false, true, PostOptions{InstallApps: true, Collections: true}, nil},
+		{"apps with collections disabled", false, true, PostOptions{Homebrew: true, InstallApps: true}, []Stage{Devcontainer}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := PostStages(tc.preview, tc.promotion, tc.options); !reflect.DeepEqual(got, tc.want) {

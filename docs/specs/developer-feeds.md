@@ -26,6 +26,10 @@ are captured on the GTK main thread before the worker starts. Page load,
 disable, failed promotion, and dry-run previews stage no catalog, install no
 Pulp, and import no subscriptions. Preview preserves observed switches.
 
+The opted-in Developer disclosure includes the resolved catalog path when
+available, so the user can find the file for manual import. Resolving this hint
+never stages the file or changes the reader's subscriptions.
+
 ## Interface
 
 An OPML 2.0 document. Structure, with the attribute constraints the validator

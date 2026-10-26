@@ -183,6 +183,13 @@ def step_packages_exact(context, title):
         f"{title!r} packages are {_disclosure_rows(context, title)}, want {want}"
 
 
+@then("the developer feed disclosure shows its manual-import file location")
+def step_feed_catalog_location(context):
+    row = atspi.row_containing(_content(context), os.path.basename(OPML_PATH))
+    expected = os.path.join(context.home, OPML_PATH)
+    assert any(expected in text for text in atspi.all_text_under(row)), f"catalog location {expected!r} is not disclosed"
+
+
 @then('the "{title}" package disclosure is informational')
 def step_packages_informational(context, title):
     header = _disclosure_header(context, title)

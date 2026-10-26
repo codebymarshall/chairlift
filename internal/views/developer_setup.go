@@ -85,7 +85,11 @@ func (uh *UserHome) addDeveloperContents(row *adw.ExpanderRow) {
 		addContentsRows(row, []homebrew.BundleItem{{Name: developerfeeds.PulpID, Kind: homebrew.BundleItemFlatpak}}, 1)
 	}
 	if group.StageFeeds {
-		addSetupContents(row, developerfeeds.OPMLFileName, "OPML feed catalog staged for you to import; no subscriptions are imported automatically.")
+		description := "OPML feed catalog for manual import after setup; no subscriptions are imported automatically."
+		if path, err := developerfeeds.OPMLPath(); err == nil {
+			description = path + "\n" + description
+		}
+		addSetupContents(row, developerfeeds.OPMLFileName, description)
 	}
 	if !group.InstallDevApps || !uh.collectionsAvailable() {
 		return
