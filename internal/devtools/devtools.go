@@ -1,6 +1,6 @@
-// Package devtools implements the user-scope parts of Bluefin's documented
-// developer workstation: WSL Mode (nsl or Lima) and rootless Docker.
-// Only fixed ublue helper commands grant host virtualization access.
+// Package devtools implements Bluefin's developer workstation controls:
+// user-scope WSL Mode (nsl or Lima) and image-provided system Docker.
+// Fixed ublue helper commands grant host access and manage system Docker.
 package devtools
 
 import (
@@ -382,14 +382,15 @@ func setNSL(ctx context.Context, enabled bool, progress func(string)) error {
 			return ErrNewLogin
 		}
 		if !NSLInstalled() {
+			name, cask := WSLPackage(BackendNSL)
 			stage("Installing…")
 			if err := homebrew.Tap("frostyard/tap"); err != nil {
 				return err
 			}
-			if err := homebrew.TrustPackages(homebrew.UntrustedTap{Name: "frostyard/tap", Casks: []string{"frostyard/tap/nsl"}}); err != nil {
+			if err := homebrew.TrustPackages(homebrew.UntrustedTap{Name: "frostyard/tap", Casks: []string{name}}); err != nil {
 				return err
 			}
-			if err := homebrew.Install("frostyard/tap/nsl", true); err != nil {
+			if err := homebrew.Install(name, cask); err != nil {
 				return err
 			}
 		}
@@ -483,7 +484,8 @@ func setLima(ctx context.Context, enabled bool, progress func(string)) error {
 			return ErrNewLogin
 		}
 		stage("Installing…")
-		if err := homebrew.Install("lima", false); err != nil {
+		name, cask := WSLPackage(BackendLima)
+		if err := homebrew.Install(name, cask); err != nil {
 			return err
 		}
 		if err := wireSSH(); err != nil {
@@ -559,86 +561,94 @@ func wireSSH() error {
 
 type DockerState struct {
 	Available bool
-	Active    bool
-	Ready     bool
-	// Unavailable explains missing host prerequisites, not a missing install.
+	// Active includes either unit running or transitioning, including socket activation.
+	Active bool
+	Ready  bool
+	// NeedsLogin means the daemon is enabled but this session cannot access its socket.
+	NeedsLogin bool
+	// Unavailable explains missing or unusable image-provided system units.
 	Unavailable string
 }
 
-const dockerSessionUnavailable = "Log out and back in to start your user session before setting up Docker."
+// ErrDockerNewLogin means this session cannot access the enabled Docker socket.
+var ErrDockerNewLogin = errors.New("docker access requires logging out and back in")
 
-// DockerStatus observes only this account's rootless service and socket.
-// A missing user unit is installable; CLI presence is never readiness.
-func DockerStatus(ctx context.Context) (DockerState, error) {
-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
-	if !filepath.IsAbs(runtimeDir) {
-		return dockerStatus(ctx, "")
-	}
-	return dockerStatus(ctx, filepath.Join(runtimeDir, "docker.sock"))
+const dockerSocket = "/var/run/docker.sock"
+
+// DockerPackages lists the Docker CE RPMs provided by the system image.
+// These are provenance, not packages ChairLift installs through Homebrew.
+func DockerPackages() []string {
+	return []string{"containerd.io", "docker-buildx-plugin", "docker-ce", "docker-ce-cli", "docker-compose-plugin"}
 }
 
-func rootlessDockerUnavailable(goos, runtimeDir string, lookup func(string) (string, error)) string {
-	if goos != "linux" {
-		return "Rootless Docker requires Linux."
-	}
-	if !filepath.IsAbs(runtimeDir) {
-		return dockerSessionUnavailable
-	}
-	for _, tool := range []string{"newuidmap", "newgidmap"} {
-		if _, err := lookup(tool); err != nil {
-			return "Rootless Docker needs newuidmap and newgidmap from your operating system."
+// DockerStatus reads both system units without escalation, then checks the
+// fixed system socket. DOCKER_HOST and the user's runtime directory are ignored.
+// Unit read or parse failures return a zero state. Once both units are read,
+// Active and Available remain observed state even if the socket ping fails.
+func DockerStatus(ctx context.Context) (DockerState, error) {
+	return dockerStatus(ctx, dockerSocket)
+}
+
+func dockerUnits(ctx context.Context) (DockerState, error) {
+	state := DockerState{Available: true}
+	for _, unit := range []string{"docker.service", "docker.socket"} {
+		output, err := command(ctx, false, "systemctl", "show", unit, "--property=LoadState,ActiveState")
+		if err != nil {
+			if ctx.Err() != nil {
+				return state, fmt.Errorf("reading %s: %w: %w", unit, ctx.Err(), err)
+			}
+			return state, err
+		}
+		var load, active string
+		for line := range strings.SplitSeq(output, "\n") {
+			key, value, _ := strings.Cut(line, "=")
+			switch key {
+			case "LoadState":
+				if load != "" || value == "" {
+					return state, fmt.Errorf("%s reported an invalid LoadState", unit)
+				}
+				load = value
+			case "ActiveState":
+				if active != "" || value == "" {
+					return state, fmt.Errorf("%s reported an invalid ActiveState", unit)
+				}
+				active = value
+			}
+		}
+		switch load {
+		case "loaded":
+		case "not-found":
+			state.Available = false
+			state.Unavailable = "Docker CE must be provided by your system image. Ask your administrator to use a Docker-enabled image."
+		case "masked", "error", "bad-setting", "merged", "stub":
+			state.Available = false
+			state.Unavailable = "Docker's system units are unavailable. Ask your administrator to repair or unmask them."
+		default:
+			return state, fmt.Errorf("%s did not report a valid LoadState", unit)
+		}
+		switch active {
+		case "inactive", "failed":
+		case "active", "reloading", "activating", "deactivating", "maintenance", "refreshing":
+			state.Active = true
+		default:
+			return state, fmt.Errorf("%s did not report a valid ActiveState", unit)
 		}
 	}
-	return ""
+	return state, nil
 }
 
 func dockerStatus(ctx context.Context, socket string) (DockerState, error) {
 	ctx, cancel := context.WithTimeout(ctx, statusTimeout)
 	defer cancel()
-	state := DockerState{Unavailable: rootlessDockerUnavailable(runtime.GOOS, filepath.Dir(socket), exec.LookPath)}
-	output, err := command(ctx, false, "systemctl", "--user", "show", "docker.service", "--property=LoadState,ActiveState")
+	state, err := dockerUnits(ctx)
 	if err != nil {
-		if strings.Contains(output, "Failed to connect") && strings.Contains(output, "bus") {
-			if state.Unavailable == "" {
-				state.Unavailable = dockerSessionUnavailable
-			}
-			return state, &PrerequisiteError{Message: state.Unavailable, Err: err}
-		}
-		return state, err
+		return DockerState{}, err
 	}
-	var load, active string
-	for line := range strings.SplitSeq(output, "\n") {
-		key, value, _ := strings.Cut(line, "=")
-		switch key {
-		case "LoadState":
-			if load != "" || value == "" {
-				return state, errors.New("docker user service reported an invalid LoadState")
-			}
-			load = value
-		case "ActiveState":
-			if active != "" || value == "" {
-				return state, errors.New("docker user service reported an invalid ActiveState")
-			}
-			active = value
-		}
-	}
-	switch load {
-	case "loaded", "not-found", "masked", "error", "bad-setting", "merged", "stub":
-	default:
-		return state, errors.New("docker user service did not report a valid LoadState")
-	}
-	switch active {
-	case "active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing":
-	default:
-		return state, errors.New("docker user service did not report a valid ActiveState")
-	}
-	state.Available = load == "loaded"
-	state.Active = active == "active"
-	if !state.Active || !filepath.IsAbs(socket) {
+	if !state.Active {
 		return state, nil
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		return dockerDial(ctx, "unix", socket)
 	}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
@@ -648,68 +658,73 @@ func dockerStatus(ctx context.Context, socket string) (DockerState, error) {
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return state, nil
+		if errors.Is(err, os.ErrPermission) {
+			state.NeedsLogin = true
+			return state, fmt.Errorf("%w: %w", ErrDockerNewLogin, err)
+		}
+		return state, err
 	}
 	defer func() { _ = response.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 16))
-	state.Ready = err == nil && response.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK"
+	body, err := io.ReadAll(io.LimitReader(response.Body, 17))
+	if err != nil {
+		return state, err
+	}
+	if len(body) > 16 || response.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != "OK" {
+		return state, fmt.Errorf("system Docker socket ping returned HTTP %d with body %q", response.StatusCode, body)
+	}
+	state.Ready = true
 	return state, nil
 }
 
+var dockerDial = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
+
+// SetDocker manages only image-provided system Docker through the fixed helper.
+// Disabling retains the installation, data, and account's Docker group access.
 func SetDocker(ctx context.Context, enabled bool, progress func(string)) error {
-	state, err := DockerStatus(ctx)
+	return setDocker(ctx, enabled, progress, ublue.SetDocker)
+}
+
+func setDocker(ctx context.Context, enabled bool, progress func(string), apply func(context.Context, bool) error) error {
+	readCtx, cancel := context.WithTimeout(ctx, statusTimeout)
+	state, err := dockerUnits(readCtx)
+	cancel()
 	if err != nil {
 		return err
 	}
-	if enabled {
-		if state.Unavailable != "" {
-			return &PrerequisiteError{Message: state.Unavailable, Err: errors.New(state.Unavailable)}
-		}
-		if progress != nil {
-			progress("Installing rootless Docker…")
-		}
-		for _, pkg := range []string{"docker", "docker-engine", "rootlesskit", "slirp4netns", "docker-compose", "lazydocker", "dive"} {
-			if err := homebrew.Install(pkg, false); err != nil {
-				return err
-			}
-		}
-		// Keep an accessible system daemon untouched while installing this user's daemon.
-		if output, err := command(ctx, true, "dockerd-rootless-setuptool.sh", "install", "--force"); err != nil {
-			if strings.Contains(output, "Missing system requirements") {
-				return &PrerequisiteError{
-					Message: "Ask your administrator to configure subordinate user/group IDs and networking support for rootless Docker.",
-					Err:     err,
-				}
-			}
-			return err
-		}
-	}
-	operation := "disable"
-	if enabled {
-		operation = "enable"
+	if !state.Available && (enabled || !state.Active) {
+		return &PrerequisiteError{Message: state.Unavailable, Err: errors.New(state.Unavailable)}
 	}
 	if progress != nil {
 		if enabled {
-			progress("Starting Docker…")
+			progress("Starting system Docker…")
 		} else {
-			progress("Stopping Docker…")
+			progress("Stopping system Docker…")
 		}
 	}
-	if _, err := command(ctx, true, "systemctl", "--user", operation, "--now", "docker.service"); err != nil {
+	if err := apply(ctx, enabled); err != nil {
 		return err
 	}
 	if dryrun.Enabled() {
 		return nil
 	}
-	state, err = DockerStatus(ctx)
-	if err != nil {
-		return err
-	}
-	if enabled && !state.Ready {
-		return errors.New("rootless Docker's socket did not respond after starting the user service")
-	}
-	if !enabled && (state.Active || state.Ready) {
-		return errors.New("rootless Docker is still running after stopping the user service")
+	if enabled {
+		state, err = DockerStatus(ctx)
+		if err != nil {
+			return err
+		}
+		if !state.Ready {
+			return errors.New("system Docker socket did not respond after enabling Docker")
+		}
+	} else {
+		readCtx, cancel := context.WithTimeout(ctx, statusTimeout)
+		defer cancel()
+		state, err = dockerUnits(readCtx)
+		if err != nil {
+			return err
+		}
+		if state.Active {
+			return errors.New("system Docker service or socket is still running after disabling Docker")
+		}
 	}
 	return nil
 }

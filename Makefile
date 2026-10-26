@@ -163,14 +163,14 @@ e2e: build-e2e schemas
 ifeq ($(E2E_COVERDIR),)
 	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) \
 		CHAIRLIFT_SCHEMA_DIR=$(abspath $(BUILD_DIR))/schemas \
-		test/e2e/dakota.sh -v -skip '^(TestATSPIBehaveSuite|TestIntegrationDockerRootlessInstall)$$'
+		test/e2e/dakota.sh -v -skip '^(TestATSPIBehaveSuite|TestIntegrationDockerSystem)$$'
 else
 	@rm -rf "$(E2E_COVERDIR)" && mkdir -p "$(E2E_COVERDIR)"
 	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) \
 		CHAIRLIFT_SCHEMA_DIR=$(abspath $(BUILD_DIR))/schemas \
 		E2E_COVERDIR=$(abspath $(E2E_COVERDIR)) \
 		GOCOVERDIR=$(abspath $(E2E_COVERDIR)) \
-		test/e2e/dakota.sh -v -skip '^(TestATSPIBehaveSuite|TestIntegrationDockerRootlessInstall)$$'
+		test/e2e/dakota.sh -v -skip '^(TestATSPIBehaveSuite|TestIntegrationDockerSystem)$$'
 	$(GOCMD) tool covdata textfmt -i=$(abspath $(E2E_COVERDIR)) -o=e2e-coverage.out
 	@echo "==> e2e statement coverage written to e2e-coverage.out"
 endif
@@ -180,7 +180,7 @@ e2e-docker: build-e2e schemas
 	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) \
 		CHAIRLIFT_SCHEMA_DIR=$(abspath $(BUILD_DIR))/schemas \
 		CHAIRLIFT_DOCKER_INTEGRATION=1 \
-		test/e2e/dakota.sh -v -count=1 -timeout 30m -run '^TestIntegrationDockerRootlessInstall$$'
+		test/e2e/dakota.sh -v -count=1 -timeout 30m -run '^TestIntegrationDockerSystem$$'
 # The behave AT-SPI suite (test/e2e/features), run by test/e2e/dakota.sh like
 # every E2E test. Artifacts land in build/atspi/<tags|all>/. ATSPI_TAGS
 # narrows the run to a behave tag expression, e.g.

@@ -40,6 +40,8 @@ internal/views/                 Page builders and event handlers (one file per p
         ├── internal/avatar/    Dinosaur avatar catalog, its bundled WebP illustrations and 256x256 preview PNGs, and the pure-Go WebP-to-PNG avatar transcoder (whole character fitted inside the 512x512 avatar circle, 4 MiB/16.8 Mpx input bound, 1 MiB output ceiling; the preview path encodes 256x256 under 512 KiB)
         ├── internal/homebrew/  Homebrew CLI wrapper (JSON output parsing)
         ├── internal/developerfeeds/ Pure-Go developer feed OPML catalog (go:embed) and offline validator
+        ├── internal/devtools/  WSL backends, image-provided system Docker, native VS Code setup and package provenance
+        ├── internal/devsetup/  Widget-free ordered developer setup, promotion outcomes and retry stages
         ├── internal/flatpak/   Flatpak CLI wrapper (tabular output parsing)
         ├── internal/bootc/     bootc wrapper (status reads, fixed stage adapter)
         ├── internal/pkexec/    Sole owner of the privilege-escalation program name (`pkexec.Command`)
@@ -96,10 +98,22 @@ this inventory, independently of the original YAML namespace names.
 | Updates | `updates_page.go` | Aggregate updates, provider detail, automatic updates, channel/graphics controls and system version |
 | Apps | `applications_page.go` | Homebrew collections first, installed casks and explicitly requested formulae next, then Brewfile export; no Flatpak inventory, external catalog launcher or package search |
 | Agents | `agents_page.go`, `troubleshoot.go`, `contribute.go` | Agent Mode using llmman, Troubleshooting's Goose row (set up, then launch in ChairLift's own profile) and menu switch, and Contribute to Bluefin |
-| Features | `features_page.go` (+ `printers_page.go`) | Distribution features, Developer Mode, Gaming Mode, and Printers |
+| Features | `features_page.go`, `developer_tools.go`, `developer_setup.go`, `setup_activity.go`, `printers_page.go` | Setup activity checklist, expandable Developer/WSL/Docker/Gaming package disclosures, distribution features and Printers |
 | Livery | `livery_page.go` | Profile Picture, App Launcher Icon, Top Bar Icon, and Files Icon surfaces |
 | Maintenance | `maintenance_page.go` | Free Up Space, administrator scripts and Powerwash entry |
 | Help | `help_page.go` | Support links, diagnostics and capability explanations |
+
+Features keeps one **Setup activity** checklist at the top and builds its
+bounded stage rows once. A reusable timer pulses while work runs, independent
+of command output. Developer Mode, WSL Mode, Enable Docker, and Gaming Mode
+use native expanders like Apps collections: the header discloses informational
+package rows, while an independent suffix switch starts work. Homebrew bundles
+are opaque operations, so package lists are static disclosures, not invented
+per-package progress. Docker's five RPM rows are **Provided by system image**,
+not Homebrew requests or current-action downloads. `internal/devsetup` owns
+developer-run ordering and outcomes; the view owns GTK wiring, and
+`internal/devtools` owns execution and Docker/WSL package provenance shared with
+those disclosures. Gaming names come from `gaming.Components`.
 
 Powerwash is an existing detail (route `recovery`) built by `recovery.go` and reached from
 Maintenance, with rollback and opt-in reset controls; the published-versions
@@ -224,8 +238,24 @@ Per-wrapper mechanics:
 - **views (custom maintenance scripts)**: `runMaintenanceAction` (`internal/views/maintenance_page.go`) calls `actionmsg.MaintenanceScript(dryrun.Enabled(), title)` once, before spawning its goroutine, to get a `ScriptDecision{Execute, Toast}`: when `Execute` is false no `exec.Cmd` is ever constructed (no `pkexec`, no direct script exec) — only a `[DRY-RUN] Would execute: ...` log line.
 - **Features page switch confirmation**: `onFeatureToggled` (`internal/views/features_page.go`) computes `decision := actionmsg.FeatureToggle(dryrun.Enabled(), enabled, name)` once, after a successful `updex.EnableFeature`/`DisableFeature` call, and branches solely on `decision.Confirm` to decide whether the switch confirms the flip (`toggle.set(enabled)`) or reverts to its pre-click state (`toggle.set(!enabled)`); `set` is `guardedSwitch`'s programmatic move, which marks itself so the resulting `::state-set` is not treated as another user action.
 - **avatar**: `Applier.Dispatch` (`internal/avatar/applier.go`) reads `dryrun.Enabled()` first and returns before constructing a process or opening a file, logging `[DRY-RUN] would set avatar to <id>`. A live dispatch reports which route took effect as an `avatar.Route`: `RouteBusctl` when AccountsService accepted `SetIconFile` over `busctl`, `RouteFaceFile` when that call failed or was unreachable and the icon was written to `~/.face.icon` and `~/.face` instead (picked up at the next session start, not immediately), and no route at all when both failed. A canceled context is reported as an error rather than being treated as an unreachable bus, so an abandoned action never writes into the user's home. The dispatch is deliberately unprivileged — AccountsService authorizes it for the caller's own account — so it takes no `pkexec` route and is classified as an unprivileged `os/exec` site in `internal/installcheck`'s journal contract. Its one caller is the Livery page's Profile Picture section (`account_group`, `internal/views/profile_picture.go`): opening the page only stats `avatar.CurrentPicture`'s candidates (AccountsService's icon, then `~/.face.icon`, then `~/.face`); picking a catalog row reads a precomputed 256x256 preview PNG from the binary and shows it, and only Apply transcodes the bundled illustration at AvatarSize, writes the PNG to `$XDG_CACHE_HOME/chairlift/avatar.png` and dispatches it. Under `--dry-run` Apply writes no file and Dispatch logs the preview. A failed preview or dispatch reveals a banner in the chooser and leaves the account's picture and the page row unchanged; the toast text for each route comes from `pageview.AvatarApplied`, so a face-file write never reads as a live change. The chooser is an `AdwDialog` built once with one row per catalog entry and one `row-activated` handler. **Adding a raptor is three steps, with no codegen step to run afterwards**: commit the illustration at `internal/avatar/assets/<base>.webp` (flat, though upstream nests it under `characters/header/`), add its `id<TAB>common name<TAB>species<TAB>path` row to `internal/avatar/assets/dino-avatars.txt` — the path stored literally, never derived from the id, and its base name unique because that base name is the key into the flat bundle — and write the 256x256 preview to `internal/avatar/assets/preview/<base>.png` by transcoding that illustration with `avatar.TranscodePreviewWebPToPNG` at `avatar.PreviewSize`. The previews are committed data, not build output, so a transcoder or `PreviewSize` change leaves every one of them stale silently: `TestEmbeddedPreviewCoversEveryCatalogEntry` proves each entry has a preview of the right shape, never that it still matches what the current transcoder would emit.
-- **Developer onboarding page**: `openDeveloperOnboarding` (`internal/views/features_page.go`) is reached only from the success branch of `onDeveloperToggled`, and dispatches through `pageview.DeveloperOnboardingTargets(dryrun.Enabled(), enabled, succeeded)`. That pure function is the whole admission rule — a confirmed live enable is the only input combination that yields a target, and it yields exactly one (the Bluefin developer documentation, which links onward to training and platform material): opening three tabs from one switch flip stacked three app-choosers on a desktop with no default browser (#494). `--dry-run` opens no browser processes during `make screenshots`, a disable is a no-op, and a failed promotion opens nothing. The URL is asserted headlessly in `internal/views/pageview`; the dispatch itself reuses `UserHome.openURL`, the same asynchronous `xdg-open` path the Help page links use, so a browser that fails to start reports its own failure by toast without touching the group promotion or the switch. A promotion whose helper skipped developer groups the image does not define (`skipped group <name>:` on stderr, parsed by `ubluehelper.SkippedGroups`) still confirms, and `actionmsg.DeveloperMode`'s ordinary, self-expiring toast names each group not granted (#495), kept short enough that `ShowToast`'s single ellipsized line does not cut the names off. It is not a persistent error toast: images that ship neither group (Dakota) skip them on every enable, and a persistent "enabled" banner outlived a later disable.
-- **Optional developer feed setup**: `startDeveloperFeedSetup` (`internal/views/features_page.go`) is called from that same success branch, and its admission rule is `actionmsg.DeveloperFeedSetupPlan(dryrun.Enabled(), enabled, succeeded, installPulp, stageFeeds)`. Only a confirmed live enable with at least one of `dx_group`'s `install_pulp`/`stage_feeds` set produces non-empty work, so a preview installs nothing during `make screenshots`, a disable is a no-op, and a failed promotion starts no worker. The plan is a value read from config on the main thread before the goroutine starts, so the worker touches no widget and no view state; it calls `internal/developerfeeds`'s `Provision` and `StageOPML` (both of which re-check `dryrun.Enabled()` as defense in depth) and marshals a single `actionmsg.DeveloperFeedFeedback` result back through `sgtk.RunOnMainThread` to one toast. `developerFeedGate` refuses a second setup while an install is in flight, and the toast is nil-guarded. The wording and the failure classification come from the same tested decision struct, which is what keeps a failed optional install from reading as a failed permission change and keeps "staged" from reading as "imported".
+- **Developer setup**: Direct Developer Mode and implicit WSL/Docker promotion
+  use the same `developerGate` and `internal/devsetup.Run` sequence. When the
+  parent is off, the fixed `ublue.SetDeveloperMode` call must succeed before
+  child setup. Authentication failure/cancellation starts no child work; a
+  successful live grant updates the parent independently of later failures.
+  Child disable never demotes the parent. A preview neither confirms switches
+  nor treats suppressed operations as completed live stages. Optional
+  post-promotion work is configured on the GTK main thread and shares the run;
+  retry preserves completed optional stages without replaying the grant.
+- **Developer onboarding**: A confirmed live direct or implicit promotion
+  opens one Bluefin developer documentation page, never one tab per resource.
+  Browser dispatch reuses `UserHome.openURL`; failure does not reverse access.
+  Optional Pulp installation, OPML staging, and developer app collection
+  installation keep their config opt-ins and report their own outcomes. Pulp
+  uses system Flathub through Flatpak's authorization; OPML staging writes only
+  ChairLift's catalog, never Pulp's store. Preview, restore, disable, and failed
+  promotion perform none of these live follow-ons. See
+  [developer workstation components](package-managers.md#developer-workstation-and-gaming-components).
 - **Legacy desktop launcher cleanup**: `legacydesktop.Clean` (`internal/legacydesktop/legacydesktop.go`) runs in a background goroutine at startup. Under `--dry-run`, it logs what would be removed without deleting the file.
 ### Configuration-driven UI visibility
 
@@ -602,15 +632,29 @@ image's `/usr/lib/group` defines (nss-altfiles, as rpm-ostree composes ship
 them) into `/etc/group`, GID unchanged, because `usermod -aG` edits
 `/etc/group` alone and otherwise refuses the group
 (`internal/ubluehelper.EnsureLocalGroup`).
-The GUI's Docker action instead installs Homebrew's engine and rootless tools,
-configures the account's `docker.service`, and uses `systemctl --user`. It
-requires no helper or group change and reports ready only when the user socket
-answers HTTP 200 `OK`. Homebrew's `bin` and `sbin` are inherited by the setup
-tool and its generated unit. The fixed system-Docker helper actions remain
-available independently; no GUI client wrapper remains for them. A confirmed
+The GUI first promotes Developer Mode through the fixed `dx-enable` helper
+when Docker or WSL is enabled with developer access off. Refused or canceled
+authentication aborts child setup. Docker then calls `ublue.SetDocker` through
+the fixed `docker-enable` helper, which grants invoking-account Docker access
+and enables the image's `docker.service` and `docker.socket`. This second action
+may ask for authentication separately; it installs no Homebrew engine or user
+service. Readiness requires HTTP 200 `OK` from `/var/run/docker.sock`, independent
+of `DOCKER_HOST` and `XDG_RUNTIME_DIR`. Newly granted group access requires a new
+login, not a false Ready result (`NeedsLogin` / `ErrDockerNewLogin`). Both unit
+reads must succeed before `Active` is trustworthy; a later socket error preserves
+that observed state so supported stop remains available. Disable uses the fixed
+`docker-disable` helper, stops both units for all accounts, and retains packages,
+data, group membership, and Developer Mode. Missing image units or helper actions
+need an image/administrator fix; Homebrew and UID-map tools are not Docker gates.
+Native VS Code setup is a separate optional user-scoped outcome: seed absent
+settings without rewriting JSONC or symlinks, install Bluefin DX's three
+extensions, and commit the upstream version-1 marker only after success. Marker
+presence alone is not proof the extensions were installed. Missing native `code`
+or editor failure never reverses Docker/developer access and remains retryable;
+preview writes no settings or marker and launches no editor CLI. A confirmed
 Developer Mode enable installs the Dev Container CLI (`devcontainer`) through
 Homebrew when available; installation failure does not reverse developer access.
-IDEs and editors are not offered here (Bazaar or the Apps page).
+Editor selection/installation remains in Bazaar or Apps.
 
 **Why the helper paths must be absolute, and why `PREFIX=/usr`:** `pkexec`
 resolves the program it's asked to run to an absolute path and compares it

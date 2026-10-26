@@ -109,17 +109,19 @@ The app builds pure-Go (`CGO_ENABLED=0`); the race detector needs CGO.
   asserts the `main: application exited` marker after its `SIGTERM`, so a
   regression fails `make e2e`. Keep the harnesses sending `SIGTERM` first and
   `SIGKILL` only on timeout.
-- **The live Docker installation gate has a private native user manager.**
-  `make e2e-docker` runs `TestIntegrationDockerRootlessInstall` through
-  `test/e2e/dakota.sh` with `CHAIRLIFT_DOCKER_INTEGRATION=1`. That mode refuses
-  rootful Podman, starts the same pinned Dakota image with native systemd,
-  and provisions temporary subordinate IDs and an isolated Homebrew prefix.
-  Its `--privileged` flag applies only inside rootless Podman's user namespace;
-  it grants no host root and mounts no host user bus or Docker socket. Preserve
-  Dakota's native UID-map file capabilities. The live AT-SPI click installs
-  actual packages, verifies rootless Docker's socket and observed ready UI,
-  then disables it while preserving its installation and data. Ordinary
-  accessibility scenarios remain dry-run and run in the unprivileged fixture.
+- **The live system-Docker gate uses private native managers.**
+  `make e2e-docker` selects `TestIntegrationDockerSystem` in
+  `test/e2e/docker_system_test.go` through `test/e2e/dakota.sh` with
+  `CHAIRLIFT_DOCKER_INTEGRATION=1`. Its pinned Dakota fixture provides real
+  Docker binaries and system units before ChairLift launches; this is fixture
+  provisioning, not a ChairLift package install. Native system/user managers
+  run inside rootless Podman; `--privileged` applies only to that namespace,
+  with no host Docker socket or user bus mounted. The gate covers canceled
+  prerequisite authentication, ordered `dx-enable` then `docker-enable`,
+  awaiting-login feedback, a new-group session's system-socket readiness and
+  non-rootless daemon, and disabling both units while retaining packages,
+  data, account groups, and Developer Mode. Ordinary AT-SPI scenarios remain
+  dry-run; neither those previews nor screenshots prove live Docker readiness.
 - **Every destination is driven through AT-SPI, on Dakota.** `make e2e-atspi`
   runs `TestATSPIBehaveSuite` — the behave + dogtail suite in
   `test/e2e/features/`, in projectbluefin/testsuite's shape — through
@@ -686,7 +688,7 @@ An agent must not break these:
   direct launch gives them no Homebrew on `$PATH`. Homebrew commands,
   developer-tool commands, and the Goose launch use `homebrew.WithBrewPath`,
   which supplies the resolved prefix's `bin` and `sbin` without duplicating
-  existing entries. Rootless Docker needs `sbin` for Homebrew's `runc`.
+  existing entries.
 - **Homebrew update actions preserve known state.** Per-package upgrades and
   the top-level metadata update use `internal/views/actionstate` gates before
   spawning work. Failures and dry-run previews restore their controls without
@@ -752,6 +754,17 @@ An agent must not break these:
   driver switches, which replace the OS — share its admission.
   Failed observations preserve confirmed state, and previews mutate none of it.
   Do not restore separate counts or a provider-status owner in `UserHome`.
+- **Features discloses packages separately from actions.** Developer Mode,
+  WSL Mode, Enable Docker, and Gaming Mode are expanders with informational,
+  source-backed package rows and independent suffix switches; header activation
+  expands rather than toggles. The top **Setup activity** checklist owns bounded
+  stage rows and a reusable pulsing timer. It reports real operation stages and
+  outcomes, not percentages or per-package completion invented from an opaque
+  bundle command. Failure, canceled authentication, and preview are not success;
+  controls remain retryable and preview preserves observed switches.
+  Awaiting a new login is a distinct verification status, not Ready or a failed
+  action to retry. Optional setup failure exposes Retry without replaying an
+  already completed privileged Docker enable.
 - **Developer options remain discoverable without privileged support.** WSL
   Mode defaults to nsl (an Ubuntu machine inside systemd-vmspawn and
   QEMU/KVM) with Lima (Ubuntu LTS VM) as an alternative backend, both with an
@@ -765,28 +778,44 @@ An agent must not break these:
   choice is not stored: `wsl_backend` sets the default, and the first read
   follows an existing Lima machine when no managed nsl machine exists
   (`devtools.ResolveBackend`). A running machine stays stoppable even when
-  the start prerequisites are unmet. Docker installs `docker-engine`, the CLI,
-  rootlesskit, slirp4netns, and the existing Docker tools through Homebrew,
-  then uses `dockerd-rootless-setuptool.sh install --force` and the account's
-  `systemctl --user` Docker service. `--force` permits coexistence with a system
-  Docker socket without changing that daemon. It requires native UID-map helpers and
-  a user session; readiness requires HTTP 200 `OK` from
-  `$XDG_RUNTIME_DIR/docker.sock`, never CLI presence or an active unit alone.
-  Missing installation is actionable; missing UID-map tools or an unreachable
-  user session leave the option visible and insensitive with an explanation.
-  Failed reads preserve observed state and their original errors. Setup-only
-  OS requirements report an administrator action and remain retryable.
-  Disable keeps packages, the unit, and container data. The GUI's Docker path
-  is unprivileged and does not change groups; the existing fixed system-Docker
-  helper commands and policies remain separate and unchanged. Missing helper
-  actions still leave affected privileged developer controls insensitive rather
-  than hidden.
-  A confirmed Developer Mode enable installs
-  the Dev Container CLI (`devcontainer`) through Homebrew when available;
-  its own gate refuses overlapping installs, previews use Homebrew's dry-run
-  boundary without refreshing inventories, and failures never reverse developer
-  access. IDEs and editors are not offered in the Developer group (Bazaar or
-  the Apps page). Gaming Mode is a single toggle that manages the gaming
+  the start prerequisites are unmet. Docker uses the image-provided Docker CE
+  system service and socket, not a second Homebrew engine or user service.
+  `devtools.DockerPackages` lists image RPM provenance (`containerd.io`,
+  `docker-buildx-plugin`, `docker-ce`, `docker-ce-cli`,
+  `docker-compose-plugin`), disclosed as **Provided by system image**, not
+  current-action downloads. `devtools.SetDocker` calls `ublue.SetDocker` through
+  the existing fixed `docker-enable` / `docker-disable` helper actions. Enable
+  grants the invoking account Docker group access and enables both system units;
+  disable stops both for all accounts and retains packages, data, and membership.
+  Reads query both `docker.service` and `docker.socket` without escalation;
+  readiness requires HTTP 200 `OK` from `/var/run/docker.sock`, ignoring
+  `DOCKER_HOST` and `XDG_RUNTIME_DIR`. Failed unit reads return no invented state.
+  Once both units were read successfully, failed socket probes retain observed
+  `Active` so a supported stop stays available. `NeedsLogin` /
+  `ErrDockerNewLogin` identifies socket permission failure: newly granted access
+  needs a new login and is not Ready. Missing image units or helper actions
+  explain an image/administrator requirement; Homebrew and UID-map tools are not
+  Docker prerequisites. Turning Docker or WSL
+  on first enables Developer Mode if it is off, through the existing fixed
+  `dx-enable` helper under the shared `developerGate`, in the same worker.
+  Helper failure or canceled authentication aborts child setup; only confirmed
+  live helper success updates the parent switch. A later child failure retains
+  granted developer access, and turning a child off never demotes it. Direct
+  and implicit promotions share the same post-enable work and config opt-ins,
+  once per promotion. Docker's own helper may ask for authentication after
+  `dx-enable`; WSL may additionally need the fixed KVM permission grant. Missing
+  helper actions leave affected controls insensitive rather than hidden, but a
+  known active Docker unit remains stoppable when the paired unit is unavailable
+  and the disable action is supported. Native VS Code setup is a separate optional
+  user-scoped outcome of Docker enable, not an editor installer. It seeds only
+  absent `~/.config/Code/User/settings.json`; existing files, JSONC, and symlinks
+  are untouched. It installs Bluefin DX's three extensions and records
+  `.version.user.vscode = "1"` in `${SETUP_CHECKER_FILE:-$HOME/.local/share/ublue/setup_versioning.json}`
+  only after successful setup; an existing marker is checked against installed
+  extension IDs rather than trusted alone. Failure remains retryable and never
+  reverses access. Preview writes no settings or marker and launches no editor
+  CLI. Editor selection/installation remains in Bazaar or Apps. Gaming Mode is
+  a single toggle that manages the gaming
   tools stack (ProtonPlus, Protontricks, GOverlay, MangoHud), installs
   missing ones system-wide with `flatpak install --system`, and keeps partial
   failures visible. Its inventory reads both scopes, so a copy an earlier
@@ -871,35 +900,27 @@ An agent must not break these:
   `UpdateShell.notifyUpdateComplete`), because it is the one action long enough a user may
   have stepped away. A toggle or switch completes in view and already has a
   toast; do not add a second notification for the same instant event.
-- **Developer-mode feed and app onboarding is opt-in, follows the enable, and
-  never reverses it.** `dx_group`'s `install_pulp`, `stage_feeds`, and
-  `install_dev_apps` all default to `false`, and together with automatic Dev
-  Container CLI (`devcontainer`) installation (`startDeveloperDevcontainerSetup`)
-  they are the only additional work the Developer Mode switch does beyond the
-  privileged group promotion.
-  `install_dev_apps` installs the `dakota-dev-flatpaks` collection
-  (`startDeveloperAppsSetup`) and additionally requires
-  `applications_page.brew_bundles_group` to pass `groupEnabled` (its config
-  and Homebrew capability floor), so a host without Homebrew never attempts it.
-  `startDeveloperFeedSetup` and `startDeveloperAppsSetup`
-  (`internal/views/features_page.go`) run from the same success branch
-  `openDeveloperOnboarding` uses, behind confirmed live promotions only:
-  `actionmsg.DeveloperFeedSetupPlan(dryRun, enabled, succeeded, …)` and
-  `actionmsg.DeveloperAppsSetupPlan(dryRun, enabled, succeeded, …)`: a
-  `--dry-run` preview, a disable, a page restore, and a failed helper call all
-  produce an empty plan and start no worker. Pulp is a system-scope Flatpak
-  from the system Flathub remote (already present in either scope means no
-  install), authorized by Flatpak's own PolicyKit as above, and the catalog is
-  one file under `~/.local/share/chairlift` — so no `pkexec` route is
-  involved, Pulp's sandboxed store is never written
-  to, and the feedback never claims a subscription was imported. The two
-  optional outcomes are reported separately from the permission change, which
-  has already succeeded: a failed install is a failed install, it rolls nothing
-  back, and it must not read as a failed enable. Disabling Developer Mode is a
-  clean no-op — it removes neither Pulp nor the staged file nor anything the
-  user imported. The worker reads its plan from config on the main thread
-  before it starts, is admitted one at a time by `developerFeedGate`, and
-  reaches the toast only through `sgtk.RunOnMainThread` behind a nil guard.
+- **Developer-mode onboarding is opt-in, follows promotion, and never reverses
+  it.** `internal/devsetup.Run` sequences the shared direct/implicit enable run
+  under `developerGate`; widget wiring stays in `internal/views`. A confirmed
+  live promotion opens one developer documentation page and installs the Dev
+  Container CLI (`devcontainer`) when Homebrew is available. `dx_group`'s
+  `install_pulp`, `stage_feeds`, and `install_dev_apps` default to `false`.
+  The last installs `dakota-dev-flatpaks` only when
+  `applications_page.brew_bundles_group` passes `groupEnabled`, including its
+  Homebrew floor. Capture config/capabilities as `devsetup.PostOptions` on the
+  GTK main thread; `devsetup.PostStages` selects the work before the worker
+  starts. Restore, failed promotion, disable, and preview start none of these
+  live follow-ons. Retries retain completed optional stages and retry
+  failed work without repeating the promotion or successful optional installs.
+  Pulp is a system-scope Flatpak from system Flathub (an existing copy in
+  either scope needs no install), authorized by Flatpak's own PolicyKit, not
+  `pkexec`. Feed staging writes one catalog under `~/.local/share/chairlift`,
+  never Pulp's sandboxed store; report it as staged, not imported. Optional
+  outcomes are separate from already-granted developer access: their failure
+  rolls nothing back. Disabling Developer Mode removes neither Pulp, the
+  staged file, developer apps, nor anything the user imported. Marshal feedback
+  through `sgtk.RunOnMainThread` with nil guards.
 - **Troubleshooting runs Goose in ChairLift's own profile, never the user's.**
   The Agents page's **Troubleshooting** group (`agents_page`
   `troubleshooting_group`, floored on Homebrew; `internal/views/troubleshoot.go`)

@@ -12,18 +12,18 @@ import (
 	"github.com/projectbluefin/chairlift/internal/config"
 )
 
-// TestIntegrationDockerRootlessInstall is selected by make e2e's dedicated
-// rootless Dakota systemd fixture. It installs real Homebrew packages through
-// the live switch, then checks both the native socket and observed UI state.
-func TestIntegrationDockerRootlessInstall(t *testing.T) {
+// TestIntegrationDockerSystem drives the real fixed helpers in the dedicated
+// rootless-Podman Dakota fixture. Docker packages are supplied by its signed
+// prerequisite image; the live GUI manages only the system daemon and access.
+func TestIntegrationDockerSystem(t *testing.T) {
 	if os.Getenv("CHAIRLIFT_DOCKER_INTEGRATION") != "1" {
-		t.Skip("run through CHAIRLIFT_DOCKER_INTEGRATION=1 test/e2e/dakota.sh: a private native user manager and subordinate UID maps are required")
+		t.Skip("run make e2e-docker: a private native system manager and signed Docker prerequisite image are required")
 	}
 	app := filepath.Join(e2eBuildDir(t), "e2e", "chairlift")
 	requireExecutable(t, app)
 	python := atspiPython()
 	requireATSPIStack(t, python)
-	outDir := filepath.Join(e2eBuildDir(t), "docker-rootless")
+	outDir := filepath.Join(e2eBuildDir(t), "docker-system")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestIntegrationDockerRootlessInstall(t *testing.T) {
 
 	root := repoRoot(t)
 	cmd := exec.Command("dbus-run-session", "--", filepath.Join(root, "test", "e2e", "wayland_session.sh"),
-		python, filepath.Join(root, "test", "e2e", "docker_rootless_integration.py"), app, outDir)
+		python, filepath.Join(root, "test", "e2e", "docker_system_integration.py"), app, outDir)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
 		"GDK_DEBUG=no-portals", "GSETTINGS_BACKEND=memory", "GTK_A11Y=atspi",
@@ -73,9 +73,9 @@ func TestIntegrationDockerRootlessInstall(t *testing.T) {
 		}
 	})
 	err = runWithTimeout(cmd, 25*time.Minute)
-	t.Logf("live rootless Docker integration:\n%s", output.String())
+	t.Logf("live system Docker integration:\n%s", output.String())
 	if err != nil {
-		t.Fatalf("rootless Docker installation/UI failed: %v\nartifacts: %s\n%s\n%s", err, outDir,
+		t.Fatalf("system Docker activation/UI failed: %v\nartifacts: %s\n%s\n%s", err, outDir,
 			output.String(), tailFile(filepath.Join(outDir, "chairlift.log"), 20000))
 	}
 }

@@ -20,8 +20,10 @@ are the current owners, not implementation instructions copied from old plans.
 | [`internal/printerapp`](../../internal/printerapp/printerapp.go) | Rootless printer quadlets, administration gate and observed diagnostics | Invoking account |
 | [`internal/agentmode`](../../internal/agentmode/readiness.go) | Goose launch readiness, profile-isolated launch, one-session guard and Ask Bluefin dispatch | Invoking account |
 | [`internal/troubleshoot`](../../internal/troubleshoot/troubleshoot.go) | Goose/Linux MCP installation and ChairLift's own Goose profile | Invoking account |
+| [`internal/devtools`](../../internal/devtools/devtools.go) | WSL backends, image-provided system Docker, native VS Code setup and canonical package provenance | WSL/editor work is user-scoped; KVM and system Docker use the existing fixed helper |
+| [`internal/devsetup`](../../internal/devsetup/setup.go) | Ordered developer setup and retry outcomes over injected tasks | Adds no privileged route; initial Developer Mode promotion uses the existing ublue helper |
 
-All integrations read the single process-wide `dryrun.Enabled()` flag from
+Mutation wrappers read the single process-wide `dryrun.Enabled()` flag from
 [`internal/dryrun`](../../internal/dryrun/dryrun.go). There are no per-wrapper
 preview flags. A suppressed mutation may return nil, so nil alone must never
 make a view remove a row, change an inventory, or claim installation.
@@ -685,15 +687,48 @@ surface is not permission to make the fixed provider helpers configurable.
 ## Developer workstation and gaming components
 
 [`internal/devtools`](../../internal/devtools/devtools.go) owns WSL backends
-and rootless Docker setup under `features_page.dx_group`. The developer-access switch
-does not install editors or switch to a different OS image (editors and IDEs
-are installed via Bazaar or the Apps page). A confirmed Developer Mode enable
+and image-provided system Docker under `features_page.dx_group`, plus optional
+native VS Code setup.
+[`internal/devsetup`](../../internal/devsetup/setup.go) owns the widget-free
+ordered run and its stage outcomes. `PostStages` selects eligible post-promotion
+work from a `PostOptions` snapshot; the view supplies execution callbacks.
+`onDeveloperToggled` and the WSL/Docker handler share `developerGate`, covering
+promotion, child setup, and configured post-enable work in one worker rather
+than nesting switch handlers.
+When Developer Mode is off, child enable first calls the existing
+`ublue.SetDeveloperMode` fixed `dx-enable` helper. Authentication failure or
+cancellation aborts the child. Only successful live promotion confirms the
+parent; a later child or optional-install failure never revokes it. Child
+disable never demotes the parent, and preview preserves all observed switches.
+Retries retain successful optional stages rather than repeating installs.
+
+The shared post-promotion path opens one developer documentation page and
 installs the Dev Container CLI (`devcontainer`) when Homebrew is available.
-`startDeveloperDevcontainerSetup` runs off the GTK thread behind its own action
-gate, so repeated enables do not overlap installs. Failure reports only the
-install failure and preserves developer access. Preview reaches Homebrew's
-existing dry-run boundary and leaves the Apps inventory unchanged; only live
-success refreshes it.
+Pulp, feed staging, and the developer app collection retain their opt-ins and
+independent outcomes; editor selection/installation remains in Bazaar or Apps,
+with native VS Code configuration a separate optional Docker-enable step.
+No OS image switch is involved. The run captures config on the
+GTK main thread, does external work off-thread, and marshals widget changes
+back through `sgtk.RunOnMainThread`. Failed or previewed work leaves the action
+retryable and never invents a live installation or clears known inventories.
+
+Features builds one top **Setup activity** checklist with bounded, reusable
+stage rows and a pulsing timer independent of provider output. Stage outcomes
+distinguish complete, failed, canceled, preview, and awaiting-new-login work;
+there is no estimated percentage. Awaiting login is not readiness or a generic
+failure and does not offer Retry just to repeat the same permission grant.
+Developer Mode, WSL Mode, Enable Docker, and Gaming Mode use native
+expanders matching Apps collections. Header activation expands an informational
+package list; a separate suffix switch runs the action, with no
+`SetActivatableWidget` binding to that switch. WSL disclosure shares
+`devtools.WSLPackage` with execution; Docker's `devtools.DockerPackages` instead
+lists five image RPMs as **Provided by system image**, not Homebrew requests or
+download progress. Gaming uses `gaming.Components`. Developer Mode discloses
+its Dev Container CLI and enabled
+follow-ons, subject to the same capability/config gates as execution. An opaque
+Homebrew bundle remains one operation: its static package disclosure is not a
+live per-package completion stream. Signals and rows are built once, not per
+refresh.
 
 `dx_group.wsl_backend` defaults to **nsl**, with **Lima** as an administrator
 option and an in-session backend chooser. The first observation retains an
@@ -716,28 +751,68 @@ enables autostart and verifies `limactl shell ubuntu true`. Its disable removes
 autostart and stops Ubuntu without deleting its disk. A listed/running VM
 alone is not shell readiness.
 
-Docker's GUI path is unprivileged and rootless. `devtools.SetDocker` installs
-`docker`, `docker-engine`, `rootlesskit`, `slirp4netns`, `docker-compose`,
-`lazydocker`, and `dive` through the existing Homebrew mutation boundary,
-then runs `dockerd-rootless-setuptool.sh install --force` and
-`systemctl --user enable --now docker.service`. The fixed `--force` permits
-coexistence with an accessible system Docker socket; it never stops or changes
-that daemon. Live readiness is still mandatory. The setup command inherits
-Homebrew's `bin` and `sbin`, because the engine resolves `runc` from `sbin`.
-`DockerStatus` reads the user unit and pings `$XDG_RUNTIME_DIR/docker.sock`;
-only HTTP 200 `OK` is ready. It never observes a root system daemon or an
-arbitrary `DOCKER_HOST`. A missing unit is installable, not an unsupported host;
-missing UID-map executables or an unreachable user bus remain visible
-prerequisites. A missing bus is still a failed observation: its original error
-is preserved, and the view must not replace previously observed active state.
-Setup-only missing OS requirements use `PrerequisiteError` to report the
-administrator's subordinate-ID/networking configuration action.
-Disable stops/disables the user unit and keeps packages, the unit, and data.
-Live completion re-reads state and fails if the requested readiness/stopped
-state is not observed. Dry-run executes no mutations. The fixed privileged
-system-Docker helper commands and policies remain unchanged and separate from
-this GUI path. View mutations share `developerGate`, reset on every result,
-and render post-action observations on the GTK main thread.
+After the Developer Mode prerequisite above, `devtools.SetDocker` calls
+`ublue.SetDocker` through the existing fixed `/usr/bin/chairlift-helper`
+`docker-enable` or `docker-disable` PolicyKit action. These actions accept no
+caller-supplied account or unit. Enable grants the invoking account membership
+in `docker` and runs the fixed `systemctl enable --now docker.socket docker.service`;
+disable uses `disable --now` on both units and retains packages, data, and group
+membership. This is the computer's native Docker CE daemon, not an additional
+Homebrew engine or account-owned service. Both `dx-enable` and `docker-enable`
+can ask for authentication in the same run; a refused parent prerequisite
+starts no Docker work, and a later refusal never revokes already-granted access.
+
+`devtools.DockerPackages` records the image's RPM provenance in upstream order:
+`containerd.io`, `docker-buildx-plugin`, `docker-ce`, `docker-ce-cli`, and
+`docker-compose-plugin`. ChairLift neither installs these packages nor treats
+them as current-action downloads. Missing image units require an image or
+administrator fix, not a Homebrew fallback. Neither Homebrew, UID-map tools,
+nor a user service manager is a Docker availability prerequisite.
+
+`DockerStatus` reads `LoadState` and `ActiveState` for both system units without
+escalation, then pings `/var/run/docker.sock`; only HTTP 200 `OK` is Ready.
+`DOCKER_HOST` and `XDG_RUNTIME_DIR` do not redirect that probe. Missing or masked
+units are classified as unavailable, but a known running unit remains stoppable
+with a supported disable action. A failed unit read or parse returns zero state
+and the original error; once both reads succeeded, a failed socket probe retains
+observed `Active`/`Available`. The view preserves prior known state on unreadable
+observations rather than inventing off. Socket permission refusal sets
+`NeedsLogin` and wraps `ErrDockerNewLogin`: newly granted group access requires
+a new login and is not Ready. Live disable verifies both units stopped, preventing
+socket activation from silently starting the daemon again. Dry-run performs no
+mutations and preserves switches. The same `developerGate` covers the whole run;
+widget observations are rendered on the GTK main thread.
+
+Docker enable orders system activation, readiness verification, then optional
+native Microsoft VS Code setup and independent post-promotion opt-ins. Awaiting
+login is an explicit verification outcome; optional editor failure is reported
+separately and never reverses Docker/developer access. Retry for a failed optional
+stage observes existing active Docker instead of replaying a privileged enable.
+[`devtools.SetupVSCode`](../../internal/devtools/vscode.go) requires native `code`
+but does not install an editor. It exclusively creates absent
+`~/.config/Code/User/settings.json` with Bluefin DX defaults (custom title bar,
+Cascadia Code font stack, and editor self-updates off). Existing settings,
+including JSONC, symlinks, and files created concurrently, are left intact.
+The extensions are `ms-vscode-remote.remote-containers`,
+`ms-vscode-remote.remote-ssh`, and `ms-azuretools.vscode-containers`.
+
+The upstream marker is `${SETUP_CHECKER_FILE:-$HOME/.local/share/ublue/setup_versioning.json}`
+with `.version.user.vscode == "1"`. Upstream can write that marker before hook
+completion, so ChairLift checks installed extension IDs before honoring it and
+installs any missing IDs. It preserves unrelated marker fields and writes version
+1 atomically only after successful setup; partial failures remain retryable.
+Preview writes no settings or marker and starts no editor CLI. Missing native
+`code`, malformed marker data, or an extension failure is an optional setup
+failure, not a false Docker or Developer Mode failure.
+
+`make e2e-docker` selects `TestIntegrationDockerSystem` in
+[`docker_system_test.go`](../../test/e2e/docker_system_test.go). The pinned Dakota
+fixture supplies real Docker binaries/system units before app launch, separately
+from ChairLift. It uses private native managers in rootless Podman's namespace
+and no host socket or bus. Its live assertions cover authentication ordering and
+cancellation, awaiting login, a new-group session's HTTP socket readiness and
+non-rootless daemon, and stop preserving packages/data/groups and Developer Mode.
+Dry-run AT-SPI scenarios and screenshots do not establish live readiness.
 
 [`internal/gaming`](../../internal/gaming/gaming.go) manages the gaming tools
 stack (ProtonPlus, Protontricks, GOverlay, MangoHud). Enable installs missing

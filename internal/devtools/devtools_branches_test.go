@@ -311,11 +311,6 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 func fakeSystemctl(t *testing.T, report string) string {
 	t.Helper()
 	dir := t.TempDir()
-	for _, name := range []string{"newuidmap", "newgidmap"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
 	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte("#!/bin/sh\nprintf '%s' '"+report+"'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -389,12 +384,13 @@ func TestDockerReadyRequiresAnOKPing(t *testing.T) {
 		{http.StatusInternalServerError, "OK"},
 		{http.StatusOK, "NOT OK"},
 		{http.StatusOK, ""},
+		{http.StatusOK, "OK" + strings.Repeat(" ", 14) + "not OK"},
 	} {
 		fakeSystemctl(t, "LoadState=loaded\nActiveState=active\n")
 		socket, hits := pingServer(t, tc.status, tc.body)
 		state, err := dockerStatus(context.Background(), socket)
-		if err != nil || !state.Active || state.Ready {
-			t.Fatalf("ping %d %q gave %+v %v, want active but not ready", tc.status, tc.body, state, err)
+		if err == nil || !state.Available || !state.Active || state.Ready {
+			t.Fatalf("ping %d %q gave %+v %v, want active but not ready with its failure", tc.status, tc.body, state, err)
 		}
 		if hits.Load() != 1 {
 			t.Fatalf("ping %d %q: daemon hit %d times", tc.status, tc.body, hits.Load())

@@ -1,8 +1,11 @@
 package pageview
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/projectbluefin/chairlift/internal/devtools"
 )
 
 // The switch replaces the operating system, so no state may leave that
@@ -137,5 +140,66 @@ func TestGamingResultReportsCountsAndFailures(t *testing.T) {
 					test.enabled, test.changed, test.failed, got, test.wantHas)
 			}
 		})
+	}
+}
+
+func TestDockerControlPermissionFollowsObservedDirection(t *testing.T) {
+	for _, test := range []struct {
+		name                  string
+		canEnable, canDisable bool
+		whenOff, whenOn       bool
+	}{
+		{"neither action", false, false, false, false},
+		{"enable only", true, false, true, false},
+		{"disable only", false, true, false, true},
+		{"both actions", true, true, true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := DockerControlAllowed(false, test.canEnable, test.canDisable); got != test.whenOff {
+				t.Errorf("inactive Docker operable=%v, want %v", got, test.whenOff)
+			}
+			if got := DockerControlAllowed(true, test.canEnable, test.canDisable); got != test.whenOn {
+				t.Errorf("active Docker operable=%v, want %v", got, test.whenOn)
+			}
+		})
+	}
+}
+
+func TestDockerSubtitleDistinguishesSystemAndClientState(t *testing.T) {
+	probeErr := errors.New("socket diagnostic must not be shown")
+	for _, test := range []struct {
+		name  string
+		state devtools.DockerState
+		err   error
+		want  string
+	}{
+		{"inactive image units", devtools.DockerState{Available: true}, nil, "No engine packages are installed"},
+		{"ready", devtools.DockerState{Available: true, Active: true, Ready: true}, nil, "System Docker is ready for this account"},
+		{"new login flag before ready", devtools.DockerState{Active: true, Ready: true, NeedsLogin: true}, probeErr, "Log out and back in"},
+		{"wrapped new login", devtools.DockerState{Active: true}, errors.Join(probeErr, devtools.ErrDockerNewLogin), "Log out and back in"},
+		{"active failed ping", devtools.DockerState{Active: true}, probeErr, "running, but its socket is not responding"},
+		{"failed units read", devtools.DockerState{}, probeErr, "Couldn't check Docker's system service"},
+		{"missing paired unit", devtools.DockerState{Active: true, Unavailable: "Repair the image units."}, probeErr, "Repair the image units."},
+		{"new login before unavailable", devtools.DockerState{Active: true, NeedsLogin: true, Unavailable: "Repair the image units."}, probeErr, "Log out and back in"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := DockerSubtitle(test.state, test.err)
+			if !strings.Contains(got, test.want) || strings.Contains(got, probeErr.Error()) || strings.Contains(got, "rootless") {
+				t.Fatalf("DockerSubtitle = %q, want %q without raw errors or rootless claims", got, test.want)
+			}
+			if (test.state.NeedsLogin || errors.Is(test.err, devtools.ErrDockerNewLogin)) && strings.Contains(got, "ready") {
+				t.Fatalf("new login rendered as ready: %q", got)
+			}
+		})
+	}
+}
+
+func TestDockerEditorFailureSeparatesPreviewFromLiveAccess(t *testing.T) {
+	live, preview := DockerEditorFailure(false), DockerEditorFailure(true)
+	if !strings.Contains(live, "Docker access is enabled") || !strings.Contains(live, "VS Code setup couldn't finish") {
+		t.Fatalf("live failure = %q", live)
+	}
+	if !strings.Contains(preview, "[DRY-RUN]") || !strings.Contains(preview, "no Docker changes made") || strings.Contains(preview, "access is enabled") {
+		t.Fatalf("preview failure = %q", preview)
 	}
 }

@@ -1,96 +1,62 @@
 package devtools
 
 import (
-	"bytes"
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
-	"log"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
+	"github.com/projectbluefin/chairlift/internal/journal"
+	"github.com/projectbluefin/chairlift/internal/pkexec"
+	"github.com/projectbluefin/chairlift/internal/ublue"
 )
 
-const dockerShowCall = "systemctl --user show docker.service --property=LoadState,ActiveState"
+const (
+	dockerServiceCall = "systemctl show docker.service --property=LoadState,ActiveState"
+	dockerSocketCall  = "systemctl show docker.socket --property=LoadState,ActiveState"
+)
 
-func dockerInstallCalls() []string {
-	return []string{
-		"brew install docker",
-		"brew install docker-engine",
-		"brew install rootlesskit",
-		"brew install slirp4netns",
-		"brew install docker-compose",
-		"brew install lazydocker",
-		"brew install dive",
-	}
+func dockerReport(load, active string) string {
+	return "LoadState=" + load + "\nActiveState=" + active + "\n"
 }
 
-func fakeRootlessDocker(t *testing.T, report string) (string, string) {
+// Every external command is a local fixture. In particular, neither systemctl
+// nor a helper can reach the host, even when testing the exported functions.
+func fakeSystemDocker(t *testing.T, service, socket string) (string, string) {
 	t.Helper()
-	dir := fakeSystemctl(t, report)
+	dir := fakeSystemctl(t, "")
 	calls := filepath.Join(dir, "calls")
 	t.Setenv("DOCKER_TEST_CALLS", calls)
 	t.Setenv("DOCKER_TEST_STATE", dir)
-	t.Setenv("DOCKER_TEST_REPORT", report)
-	t.Setenv("DOCKER_TEST_FAIL", "")
-	t.Setenv("DOCKER_TEST_SYSTEM_SOCKET", "")
 	t.Setenv("DOCKER_TEST_STATUS_ERROR", "")
-	t.Setenv("DOCKER_TEST_SETUP_ERROR", "")
-	t.Setenv("HOME", filepath.Join(dir, "home"))
-	for name, body := range map[string]string{
-		"brew": `printf 'brew %s\n' "$*" >> "$DOCKER_TEST_CALLS"
-[ "$DOCKER_TEST_FAIL" = "$2" ] && exit 11
-exit 0
-`,
-		"dockerd-rootless-setuptool.sh": `printf 'setup %s\n' "$*" >> "$DOCKER_TEST_CALLS"
-[ -n "$DOCKER_TEST_SETUP_ERROR" ] && { printf '%s\n' "$DOCKER_TEST_SETUP_ERROR" >&2; exit 12; }
-[ "$DOCKER_TEST_FAIL" = setup ] && exit 12
-# Match the upstream installer's refusal when a rootful socket is writable.
-if [ -w "$DOCKER_TEST_SYSTEM_SOCKET" ] && [ "$*" != 'install --force' ]; then
-  echo 'Aborting because rootful Docker is running and accessible' >&2
-  exit 16
-fi
-exit 0
-`,
-		"docker": `printf 'docker %s\n' "$*" >> "$DOCKER_TEST_CALLS"
-exit 0
-`,
-		"systemctl": `printf 'systemctl %s\n' "$*" >> "$DOCKER_TEST_CALLS"
+	writeDockerReports(t, dir, service, socket)
+	script := `#!/bin/sh
+printf 'systemctl %s\n' "$*" >> "$DOCKER_TEST_CALLS"
 case "$*" in
-'--user show docker.service --property=LoadState,ActiveState')
-  [ -n "$DOCKER_TEST_STATUS_ERROR" ] && { printf '%s\n' "$DOCKER_TEST_STATUS_ERROR" >&2; exit 14; }
-  [ "$DOCKER_TEST_FAIL" = status ] && exit 14
-  if [ "$DOCKER_TEST_FAIL" = post-status ] && { [ -f "$DOCKER_TEST_STATE/started" ] || [ -f "$DOCKER_TEST_STATE/stopped" ]; }; then
-    exit 14
-  fi
-  if [ -f "$DOCKER_TEST_STATE/stopped" ]; then
-    printf 'LoadState=loaded\nActiveState=inactive\n'
-  elif [ -f "$DOCKER_TEST_STATE/started" ]; then
-    printf 'LoadState=loaded\nActiveState=active\n'
-  else
-    printf '%s' "$DOCKER_TEST_REPORT"
-  fi
-  ;;
-'--user enable --now docker.service')
-  [ "$DOCKER_TEST_FAIL" = start ] && exit 13
-  : > "$DOCKER_TEST_STATE/started"
-  ;;
-'--user disable --now docker.service')
-  [ "$DOCKER_TEST_FAIL" = disable ] && exit 15
-  [ "$DOCKER_TEST_FAIL" = disable-noop ] && exit 0
-  : > "$DOCKER_TEST_STATE/stopped"
-  ;;
+'show docker.service --property=LoadState,ActiveState') unit=service ;;
+'show docker.socket --property=LoadState,ActiveState') unit=socket ;;
 *) exit 99 ;;
 esac
-`,
-	} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
-			t.Fatal(err)
-		}
+if [ "$DOCKER_TEST_STATUS_ERROR" = "$unit" ]; then
+  echo 'system manager read denied' >&2
+  exit 14
+fi
+while IFS= read -r line; do printf '%s\n' "$line"; done < "$DOCKER_TEST_STATE/$unit"
+`
+	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	previous := dryrun.Enabled()
 	dryrun.Set(false)
@@ -98,133 +64,237 @@ esac
 	return calls, dir
 }
 
-func TestDockerCLIPresenceDoesNotProvideADaemonButAllowsRootlessSetup(t *testing.T) {
-	calls, _ := fakeRootlessDocker(t, "LoadState=not-found\nActiveState=inactive\n")
-	socket, hits := pingServer(t, http.StatusOK, "OK")
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(socket))
-	state, err := DockerStatus(context.Background())
-	if err != nil || state.Available || state.Active || state.Ready || state.Unavailable != "" {
-		t.Fatalf("CLI-only supported host = %+v %v", state, err)
-	}
-	if hits.Load() != 0 {
-		t.Fatal("a missing user unit was probed as running")
-	}
-	if err := SetDocker(context.Background(), true, nil); err != nil {
-		t.Fatalf("supported host could not install rootless Docker: %v", err)
-	}
-	want := append([]string{dockerShowCall, dockerShowCall}, dockerInstallCalls()...)
-	want = append(want, "setup install --force", "systemctl --user enable --now docker.service", dockerShowCall)
-	assertCalls(t, calls, want...)
-	state, err = DockerStatus(context.Background())
-	if err != nil || !state.Available || !state.Active || !state.Ready || hits.Load() != 2 {
-		t.Fatalf("installed user daemon not observed ready: %+v %v, pings %d", state, err, hits.Load())
+func writeDockerReports(t *testing.T, dir, service, socket string) {
+	t.Helper()
+	for name, report := range map[string]string{"service": service, "socket": socket} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(report), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
-func TestDockerCoexistsWithAnAccessibleSystemSocket(t *testing.T) {
-	fakeRootlessDocker(t, "LoadState=not-found\nActiveState=inactive\n")
-	systemSocket, systemHits := pingServer(t, http.StatusOK, "OK")
-	t.Setenv("DOCKER_TEST_SYSTEM_SOCKET", systemSocket)
-	userSocket, userHits := pingServer(t, http.StatusOK, "OK")
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(userSocket))
-	if err := SetDocker(context.Background(), true, nil); err != nil {
-		t.Fatalf("accessible system Docker blocked rootless setup: %v", err)
+func dockerTestDial(t *testing.T, dial func(context.Context, string, string) (net.Conn, error)) {
+	t.Helper()
+	previous := dockerDial
+	dockerDial = dial
+	t.Cleanup(func() { dockerDial = previous })
+}
+
+func routeDockerSocket(t *testing.T, socket string) {
+	t.Helper()
+	dockerTestDial(t, func(ctx context.Context, network, address string) (net.Conn, error) {
+		if network != "unix" || address != "/var/run/docker.sock" {
+			t.Errorf("Docker selected %s %s instead of the fixed system socket", network, address)
+			return nil, errors.New("unexpected Docker socket address")
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, socket)
+	})
+}
+
+func TestDockerPackagesDescribeOnlyImageProvidedRPMs(t *testing.T) {
+	want := []string{"containerd.io", "docker-buildx-plugin", "docker-ce", "docker-ce-cli", "docker-compose-plugin"}
+	if got := DockerPackages(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("system image inventory = %v, want %v", got, want)
 	}
-	if userHits.Load() != 1 || systemHits.Load() != 0 {
-		t.Fatalf("readiness must come only from rootless Docker: user pings %d, system pings %d", userHits.Load(), systemHits.Load())
+	packages := DockerPackages()
+	packages[0] = "changed"
+	if !reflect.DeepEqual(DockerPackages(), want) {
+		t.Fatal("caller changed the image package inventory")
 	}
 }
 
-func TestDockerReadinessUsesOnlyTheUserRuntimeSocket(t *testing.T) {
-	calls, _ := fakeRootlessDocker(t, "LoadState=loaded\nActiveState=active\n")
+func TestDockerSystemUnitCombinations(t *testing.T) {
+	for _, service := range []string{"inactive", "active", "failed", "activating", "deactivating", "reloading", "maintenance", "refreshing"} {
+		for _, socketState := range []string{"inactive", "active", "failed"} {
+			t.Run(service+"/"+socketState, func(t *testing.T) {
+				calls, _ := fakeSystemDocker(t, dockerReport("loaded", service), dockerReport("loaded", socketState))
+				socket, hits := pingServer(t, http.StatusOK, "OK")
+				routeDockerSocket(t, socket)
+				state, err := DockerStatus(context.Background())
+				active := (service != "inactive" && service != "failed") || socketState == "active"
+				if err != nil || !state.Available || state.Active != active || state.Ready != active || state.NeedsLogin || state.Unavailable != "" {
+					t.Fatalf("system Docker = %+v %v, want active/ready %v", state, err, active)
+				}
+				if (hits.Load() == 1) != active {
+					t.Fatalf("socket pings = %d, active %v", hits.Load(), active)
+				}
+				assertCalls(t, calls, dockerServiceCall, dockerSocketCall)
+			})
+		}
+	}
+}
+
+func TestDockerReadinessUsesOnlyTheFixedSystemSocket(t *testing.T) {
+	fakeSystemDocker(t, dockerReport("loaded", "inactive"), dockerReport("loaded", "active"))
 	decoy, decoyHits := pingServer(t, http.StatusOK, "OK")
 	t.Setenv("DOCKER_HOST", "unix://"+decoy)
-	state, err := DockerStatus(context.Background())
-	if err != nil || !state.Active || state.Ready || decoyHits.Load() != 0 {
-		t.Fatalf("CLI/service/DOCKER_HOST supplied false readiness: %+v %v", state, err)
-	}
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(decoy))
 	socket, hits := pingServer(t, http.StatusOK, "OK\n")
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(socket))
-	state, err = DockerStatus(context.Background())
-	if err != nil || !state.Ready || hits.Load() != 1 || decoyHits.Load() != 0 {
-		t.Fatalf("runtime socket not used exclusively: %+v %v, pings %d/%d", state, err, hits.Load(), decoyHits.Load())
-	}
-	assertCalls(t, calls, dockerShowCall, dockerShowCall)
-}
-
-func TestDockerInstallFailuresStopBeforeSetupAndPreserveObservedState(t *testing.T) {
-	for i, install := range dockerInstallCalls() {
-		pkg := strings.TrimPrefix(install, "brew install ")
-		t.Run(pkg, func(t *testing.T) {
-			calls, _ := fakeRootlessDocker(t, "LoadState=loaded\nActiveState=active\n")
-			socket, _ := pingServer(t, http.StatusOK, "OK")
-			t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(socket))
-			t.Setenv("DOCKER_TEST_FAIL", pkg)
-			if err := SetDocker(context.Background(), true, nil); err == nil {
-				t.Fatal("failed Homebrew install reported success")
-			}
-			want := append([]string{dockerShowCall}, dockerInstallCalls()[:i+1]...)
-			assertCalls(t, calls, want...)
-			state, err := DockerStatus(context.Background())
-			if err != nil || !state.Active || !state.Ready {
-				t.Fatalf("install failure hid the running daemon: %+v %v", state, err)
-			}
-		})
-	}
-}
-
-func TestDockerSetupAndStartFailuresPreserveObservedState(t *testing.T) {
-	for _, failure := range []string{"setup", "start"} {
-		t.Run(failure, func(t *testing.T) {
-			calls, _ := fakeRootlessDocker(t, "LoadState=loaded\nActiveState=active\n")
-			socket, _ := pingServer(t, http.StatusOK, "OK")
-			t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(socket))
-			t.Setenv("DOCKER_TEST_FAIL", failure)
-			if err := SetDocker(context.Background(), true, nil); err == nil {
-				t.Fatalf("failed %s reported success", failure)
-			}
-			want := append([]string{dockerShowCall}, dockerInstallCalls()...)
-			want = append(want, "setup install --force")
-			if failure == "start" {
-				want = append(want, "systemctl --user enable --now docker.service")
-			}
-			assertCalls(t, calls, want...)
-			state, err := DockerStatus(context.Background())
-			if err != nil || !state.Active || !state.Ready {
-				t.Fatalf("%s failure hid the running daemon: %+v %v", failure, state, err)
-			}
-		})
-	}
-}
-
-func TestDockerStartRequiresObservedSocketReadiness(t *testing.T) {
-	calls, _ := fakeRootlessDocker(t, "LoadState=not-found\nActiveState=inactive\n")
-	if err := SetDocker(context.Background(), true, nil); err == nil {
-		t.Fatal("successful setup and service start without a socket reported ready")
-	}
-	want := append([]string{dockerShowCall}, dockerInstallCalls()...)
-	want = append(want, "setup install --force", "systemctl --user enable --now docker.service", dockerShowCall)
-	assertCalls(t, calls, want...)
+	routeDockerSocket(t, socket)
 	state, err := DockerStatus(context.Background())
-	if err != nil || !state.Active || state.Ready {
-		t.Fatalf("unreachable started daemon state = %+v %v", state, err)
+	if err != nil || !state.Ready || !state.Active || hits.Load() != 1 || decoyHits.Load() != 0 {
+		t.Fatalf("fixed socket readiness = %+v %v, pings %d/%d", state, err, hits.Load(), decoyHits.Load())
 	}
 }
 
-func TestDockerDisableOnlyStopsTheUserServiceAndRetainsItsFiles(t *testing.T) {
-	for _, failure := range []string{"", "disable", "disable-noop"} {
-		name := failure
-		if name == "" {
-			name = "success"
+func TestDockerMissingAndUnusableUnitsAreNotInstallable(t *testing.T) {
+	for _, unit := range []string{"service", "socket"} {
+		for _, load := range []string{"not-found", "masked", "error", "bad-setting", "merged", "stub"} {
+			t.Run(unit+"/"+load, func(t *testing.T) {
+				service, socket := dockerReport("loaded", "inactive"), dockerReport("loaded", "inactive")
+				if unit == "service" {
+					service = dockerReport(load, "inactive")
+				} else {
+					socket = dockerReport(load, "inactive")
+				}
+				calls, _ := fakeSystemDocker(t, service, socket)
+				state, err := DockerStatus(context.Background())
+				if err != nil || state.Available || state.Active || state.Ready || state.Unavailable == "" {
+					t.Fatalf("unusable unit = %+v %v", state, err)
+				}
+				if load == "not-found" && !strings.Contains(state.Unavailable, "system image") {
+					t.Fatalf("missing unit lacks image prerequisite: %q", state.Unavailable)
+				}
+				var prerequisite *PrerequisiteError
+				if err := setDocker(context.Background(), true, nil, func(context.Context, bool) error {
+					t.Fatal("unavailable image attempted a privileged mutation")
+					return nil
+				}); !errors.As(err, &prerequisite) {
+					t.Fatalf("unusable image did not refuse activation: %v", err)
+				}
+				assertCalls(t, calls, dockerServiceCall, dockerSocketCall, dockerServiceCall, dockerSocketCall)
+			})
 		}
-		t.Run(name, func(t *testing.T) {
-			calls, _ := fakeRootlessDocker(t, "LoadState=loaded\nActiveState=active\n")
-			socket, _ := pingServer(t, http.StatusOK, "OK")
-			t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(socket))
-			paths := []string{
-				filepath.Join(os.Getenv("HOME"), ".local", "share", "docker", "volumes", "project"),
-				filepath.Join(os.Getenv("HOME"), ".config", "systemd", "user", "docker.service"),
+	}
+}
+
+func TestDockerReportsBothUnitReadAndParseFailures(t *testing.T) {
+	for _, unit := range []string{"service", "socket"} {
+		t.Run(unit+" read", func(t *testing.T) {
+			fakeSystemDocker(t, dockerReport("loaded", "active"), dockerReport("loaded", "active"))
+			t.Setenv("DOCKER_TEST_STATUS_ERROR", unit)
+			state, err := DockerStatus(context.Background())
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 14 || !strings.Contains(err.Error(), "system manager read denied") {
+				t.Fatalf("lost original systemctl read failure: %v", err)
 			}
+			if state != (DockerState{}) {
+				t.Fatalf("partial %s unit read exposed unverified state: %+v", unit, state)
+			}
+			if err := setDocker(context.Background(), true, nil, func(context.Context, bool) error {
+				t.Fatal("failed read allowed activation")
+				return nil
+			}); err == nil {
+				t.Fatal("failed observation reported success")
+			}
+		})
+		for _, report := range []string{"", "LoadState=loaded\n", "ActiveState=active\n", "LoadState=\nActiveState=active\n", "LoadState=garbage\nActiveState=active\n", "LoadState=loaded\nActiveState=garbage\n", "LoadState=loaded\nLoadState=loaded\nActiveState=active\n", "LoadState=loaded\nActiveState=active\nActiveState=active\n"} {
+			t.Run(unit+" parse "+report, func(t *testing.T) {
+				service, socket := dockerReport("loaded", "active"), dockerReport("loaded", "active")
+				if unit == "service" {
+					service = report
+				} else {
+					socket = report
+				}
+				fakeSystemDocker(t, service, socket)
+				if state, err := DockerStatus(context.Background()); err == nil || state != (DockerState{}) {
+					t.Fatalf("malformed %s exposed unverified state: %+v %v", unit, state, err)
+				}
+			})
+		}
+	}
+}
+
+func TestDockerSocketFailuresPreserveTheirCause(t *testing.T) {
+	for _, failure := range []error{os.ErrPermission, os.ErrNotExist, context.Canceled, context.DeadlineExceeded, errors.New("connection refused")} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			fakeSystemDocker(t, dockerReport("loaded", "inactive"), dockerReport("loaded", "active"))
+			dockerTestDial(t, func(context.Context, string, string) (net.Conn, error) { return nil, failure })
+			state, err := DockerStatus(context.Background())
+			login := errors.Is(failure, os.ErrPermission)
+			if !errors.Is(err, failure) || !state.Available || state.Ready || !state.Active || state.NeedsLogin != login || errors.Is(err, ErrDockerNewLogin) != login {
+				t.Fatalf("socket failure lost state/cause: %+v %v", state, err)
+			}
+		})
+	}
+}
+
+func TestDockerEnableRequiresObservedReadinessAfterTheHelper(t *testing.T) {
+	for _, mode := range []string{"ready", "new login", "connection refused", "bad ping", "inactive", "failed", "post service read", "post socket read"} {
+		t.Run(mode, func(t *testing.T) {
+			calls, dir := fakeSystemDocker(t, dockerReport("loaded", "inactive"), dockerReport("loaded", "inactive"))
+			socket, _ := pingServer(t, http.StatusOK, "OK")
+			routeDockerSocket(t, socket)
+			failure := errors.New("daemon connection refused")
+			if mode == "new login" || mode == "connection refused" {
+				if mode == "new login" {
+					failure = os.ErrPermission
+				}
+				dockerTestDial(t, func(context.Context, string, string) (net.Conn, error) { return nil, failure })
+			}
+			if mode == "bad ping" {
+				socket, _ = pingServer(t, http.StatusInternalServerError, "OK")
+				routeDockerSocket(t, socket)
+			}
+			applied := 0
+			var stages []string
+			err := setDocker(context.Background(), true, func(stage string) { stages = append(stages, stage) }, func(_ context.Context, enabled bool) error {
+				applied++
+				if !enabled {
+					t.Fatal("enable dispatched disable")
+				}
+				active := "active"
+				if mode == "inactive" || mode == "failed" {
+					active = mode
+				}
+				writeDockerReports(t, dir, dockerReport("loaded", active), dockerReport("loaded", active))
+				if strings.HasPrefix(mode, "post ") {
+					t.Setenv("DOCKER_TEST_STATUS_ERROR", strings.Fields(mode)[1])
+				}
+				return nil
+			})
+			if applied != 1 || len(stages) != 1 || (err == nil) != (mode == "ready") {
+				t.Fatalf("activation %q = %v, mutations %d, stages %v", mode, err, applied, stages)
+			}
+			if mode == "new login" && (!errors.Is(err, ErrDockerNewLogin) || !errors.Is(err, os.ErrPermission) || errors.Is(err, ErrNewLogin)) {
+				t.Fatalf("completed group grant lost its distinct new-login outcome: %v", err)
+			}
+			if mode == "connection refused" && !errors.Is(err, failure) {
+				t.Fatalf("daemon failure was hidden as a login request: %v", err)
+			}
+			for _, call := range recordedCalls(t, calls) {
+				if call != dockerServiceCall && call != dockerSocketCall {
+					t.Fatalf("activation ran Homebrew or a user service mutation: %s", call)
+				}
+			}
+		})
+	}
+}
+
+func TestDockerHelperFailuresPreserveObservedStateAndOriginalErrors(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		for _, code := range []int{1, 126, 127} {
+			failure := &ublue.Error{Message: "helper failed", Err: exec.Command("/bin/sh", "-c", "exit "+strconv.Itoa(code)).Run()}
+			calls, _ := fakeSystemDocker(t, dockerReport("loaded", "active"), dockerReport("loaded", "active"))
+			socket, _ := pingServer(t, http.StatusOK, "OK")
+			routeDockerSocket(t, socket)
+			if err := setDocker(context.Background(), enabled, nil, func(context.Context, bool) error { return failure }); err != failure {
+				t.Fatalf("helper failure replaced: %v, want %v", err, failure)
+			}
+			assertCalls(t, calls, dockerServiceCall, dockerSocketCall)
+			state, err := DockerStatus(context.Background())
+			if err != nil || !state.Active || !state.Ready {
+				t.Fatalf("failed/dismissed mutation changed observed state: %+v %v", state, err)
+			}
+		}
+	}
+}
+
+func TestDockerDisableConfirmsBothUnitsStoppedAndRetainsFiles(t *testing.T) {
+	for _, mode := range []string{"stopped", "service active", "socket active", "socket activating", "service deactivating", "post service read", "post socket read"} {
+		t.Run(mode, func(t *testing.T) {
+			calls, dir := fakeSystemDocker(t, dockerReport("loaded", "active"), dockerReport("loaded", "active"))
+			paths := []string{filepath.Join(dir, "docker-data", "volumes", "project"), filepath.Join(dir, "docker.service"), filepath.Join(dir, "group"), filepath.Join(dir, "docker-ce")}
 			for _, path := range paths {
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatal(err)
@@ -233,188 +303,166 @@ func TestDockerDisableOnlyStopsTheUserServiceAndRetainsItsFiles(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			t.Setenv("DOCKER_TEST_FAIL", failure)
-			err := SetDocker(context.Background(), false, nil)
-			if (err != nil) != (failure != "") {
-				t.Fatalf("disable error = %v, failure mode %q", err, failure)
-			}
-			for _, call := range recordedCalls(t, calls) {
-				if call != dockerShowCall && call != "systemctl --user disable --now docker.service" {
-					t.Fatalf("disable ran an install, setup, or non-user command: %s", call)
+			// Stopping never depends on this session's permission to ping Docker.
+			dockerTestDial(t, func(context.Context, string, string) (net.Conn, error) {
+				t.Error("disable pinged the socket, which could reactivate Docker")
+				return nil, os.ErrPermission
+			})
+			err := setDocker(context.Background(), false, nil, func(_ context.Context, enabled bool) error {
+				if enabled {
+					t.Fatal("disable dispatched enable")
 				}
-			}
-			state, err := DockerStatus(context.Background())
-			if err != nil || !state.Available || state.Active != (failure != "") || state.Ready != (failure != "") {
-				t.Fatalf("disable must report observed state: %+v %v", state, err)
+				service, socket := "inactive", "inactive"
+				switch mode {
+				case "service active":
+					service = "active"
+				case "socket active":
+					socket = "active"
+				case "socket activating":
+					socket = "activating"
+				case "service deactivating":
+					service = "deactivating"
+				}
+				writeDockerReports(t, dir, dockerReport("loaded", service), dockerReport("loaded", socket))
+				if strings.HasPrefix(mode, "post ") {
+					t.Setenv("DOCKER_TEST_STATUS_ERROR", strings.Fields(mode)[1])
+				}
+				return nil
+			})
+			if (err == nil) != (mode == "stopped") {
+				t.Fatalf("disable mode %q = %v", mode, err)
 			}
 			for _, path := range paths {
-				if got, err := os.ReadFile(path); err != nil || string(got) != "keep Docker files" {
-					t.Fatalf("disable changed %s: %q %v", path, got, err)
+				if data, err := os.ReadFile(path); err != nil || string(data) != "keep Docker files" {
+					t.Fatalf("disable changed %s: %q %v", path, data, err)
+				}
+			}
+			for _, call := range recordedCalls(t, calls) {
+				if call != dockerServiceCall && call != dockerSocketCall {
+					t.Fatalf("disable ran an install or user-systemctl mutation: %s", call)
 				}
 			}
 		})
 	}
 }
 
-func TestDockerMutationRequiresAReadablePostApplyState(t *testing.T) {
+func TestDockerCanStopAnActiveServiceWhenItsSocketIsMasked(t *testing.T) {
+	_, dir := fakeSystemDocker(t, dockerReport("loaded", "active"), dockerReport("masked", "inactive"))
+	if err := setDocker(context.Background(), false, nil, func(context.Context, bool) error {
+		writeDockerReports(t, dir, dockerReport("loaded", "inactive"), dockerReport("masked", "inactive"))
+		return nil
+	}); err != nil {
+		t.Fatalf("unavailable socket stranded running Docker: %v", err)
+	}
+}
+
+func TestDockerDryRunJournalsOnlyTheFixedSystemHelper(t *testing.T) {
 	for _, enabled := range []bool{true, false} {
-		fakeRootlessDocker(t, "LoadState=loaded\nActiveState=active\n")
-		socket, _ := pingServer(t, http.StatusOK, "OK")
-		t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(socket))
-		t.Setenv("DOCKER_TEST_FAIL", "post-status")
-		if err := SetDocker(context.Background(), enabled, nil); err == nil {
-			t.Fatalf("mutation enabled=%v accepted an unreadable post-apply state", enabled)
-		}
-	}
-}
-
-func TestDockerDryRunPreviewsEveryMutationWithoutChangingState(t *testing.T) {
-	for _, enabled := range []bool{true, false} {
-		calls, _ := fakeRootlessDocker(t, "LoadState=not-found\nActiveState=inactive\n")
-		dryrun.Set(true)
-		var output bytes.Buffer
-		previous := log.Writer()
-		log.SetOutput(&output)
-		err := SetDocker(context.Background(), enabled, nil)
-		log.SetOutput(previous)
-		if err != nil {
-			t.Fatalf("dry-run required a real post-apply daemon: %v", err)
-		}
-		for _, call := range recordedCalls(t, calls) {
-			if call != dockerShowCall {
-				t.Fatalf("dry-run executed a mutation: %s", call)
+		t.Run(map[bool]string{true: "enable", false: "disable"}[enabled], func(t *testing.T) {
+			calls, _ := fakeSystemDocker(t, dockerReport("loaded", "inactive"), dockerReport("loaded", "inactive"))
+			path := filepath.Join(t.TempDir(), "journal.jsonl")
+			t.Setenv(journal.PathEnv, path)
+			journal.Reset()
+			t.Cleanup(journal.Reset)
+			dryrun.Set(true)
+			if err := SetDocker(context.Background(), enabled, nil); err != nil {
+				t.Fatalf("dry-run required live Docker: %v", err)
 			}
-		}
-		if enabled {
-			for _, install := range dockerInstallCalls() {
-				if !strings.Contains(output.String(), install) {
-					t.Fatalf("dry-run omitted %s: %s", install, &output)
+			assertCalls(t, calls, dockerServiceCall, dockerSocketCall)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := "docker-disable"
+			if enabled {
+				command = "docker-enable"
+			}
+			var entries []journal.Entry
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				var entry journal.Entry
+				if err := json.Unmarshal([]byte(line), &entry); err != nil {
+					t.Fatal(err)
 				}
+				entries = append(entries, entry)
 			}
-			if !strings.Contains(output.String(), "dockerd-rootless-setuptool.sh") || !strings.Contains(output.String(), "install") {
-				t.Fatalf("dry-run omitted rootless setup: %s", &output)
+			want := []string{pkexec.Command, "/usr/bin/chairlift-helper", command, "--dry-run"}
+			if len(entries) != 1 || !reflect.DeepEqual(entries[0].WouldRun, want) || entries[0].Suppressed != journal.SuppressedDryRun {
+				t.Fatalf("preview did not remain at the journaled fixed-helper boundary: %+v", entries)
 			}
-		}
-		if !strings.Contains(output.String(), "--user") || !strings.Contains(output.String(), "--now") || !strings.Contains(output.String(), "docker.service") {
-			t.Fatalf("dry-run omitted user service mutation: %s", &output)
-		}
-		state, err := DockerStatus(context.Background())
-		if err != nil || state.Available || state.Active || state.Ready {
-			t.Fatalf("dry-run invented daemon state: %+v %v", state, err)
-		}
-	}
-}
-
-func TestDockerRootlessPrerequisites(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		goos    string
-		runtime string
-		missing string
-	}{
-		{"supported", "linux", "/run/user/1000", ""},
-		{"not Linux", "darwin", "/run/user/1000", ""},
-		{"no runtime", "linux", "", ""},
-		{"relative runtime", "linux", "runtime", ""},
-		{"missing uidmap", "linux", "/run/user/1000", "newuidmap"},
-		{"missing gidmap", "linux", "/run/user/1000", "newgidmap"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			reason := rootlessDockerUnavailable(tc.goos, tc.runtime, func(name string) (string, error) {
-				if name != "newuidmap" && name != "newgidmap" {
-					t.Fatalf("unexpected prerequisite lookup: %s", name)
-				}
-				if name == tc.missing {
-					return "", errors.New("not installed")
-				}
-				return "/usr/bin/" + name, nil
-			})
-			if (reason == "") != (tc.name == "supported") {
-				t.Fatalf("unavailable reason = %q", reason)
-			}
-		})
-	}
-}
-
-func TestDockerUnsupportedHostRefusesInstallButCanStopExistingService(t *testing.T) {
-	calls, dir := fakeRootlessDocker(t, "LoadState=loaded\nActiveState=active\n")
-	if err := os.Remove(filepath.Join(dir, "newgidmap")); err != nil {
-		t.Fatal(err)
-	}
-	socket, _ := pingServer(t, http.StatusOK, "OK")
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(socket))
-	state, err := DockerStatus(context.Background())
-	if err != nil || state.Unavailable == "" || !state.Active || !state.Ready {
-		t.Fatalf("unsupported host lost observed user daemon: %+v %v", state, err)
-	}
-	if err := SetDocker(context.Background(), true, nil); err == nil {
-		t.Fatal("host without uidmap prerequisites installed Docker")
-	}
-	assertCalls(t, calls, dockerShowCall, dockerShowCall)
-	if err := SetDocker(context.Background(), false, nil); err != nil {
-		t.Fatalf("unsupported host could not stop existing user daemon: %v", err)
-	}
-}
-
-func TestDockerInvalidRuntimeRefusesSetupWithoutInventingAStoppedService(t *testing.T) {
-	for _, runtimeDir := range []string{"", "relative-runtime"} {
-		calls, _ := fakeRootlessDocker(t, "LoadState=loaded\nActiveState=active\n")
-		t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-		state, err := DockerStatus(context.Background())
-		if err != nil || state.Unavailable == "" || !state.Active || state.Ready {
-			t.Fatalf("invalid runtime %q lost observed service state: %+v %v", runtimeDir, state, err)
-		}
-		if err := SetDocker(context.Background(), true, nil); err == nil {
-			t.Fatalf("runtime %q allowed rootless setup", runtimeDir)
-		}
-		assertCalls(t, calls, dockerShowCall, dockerShowCall)
-	}
-}
-
-func TestDockerUserBusFailuresRemainErrorsAndExplainMissingSession(t *testing.T) {
-	for _, tc := range []struct {
-		message string
-		session bool
-	}{
-		{"Failed to connect to user scope bus via local transport: No medium found", true},
-		{"Failed to connect to bus: No such file or directory", true},
-		{"Failed to connect to user scope bus via local transport: Permission denied", true},
-		{"unexpected systemctl failure", false},
-	} {
-		t.Run(tc.message, func(t *testing.T) {
-			calls, _ := fakeRootlessDocker(t, "LoadState=loaded\nActiveState=active\n")
-			t.Setenv("DOCKER_TEST_STATUS_ERROR", tc.message)
 			state, err := DockerStatus(context.Background())
-			var prerequisite *PrerequisiteError
-			if err == nil || errors.As(err, &prerequisite) != tc.session || (state.Unavailable != "") != tc.session {
-				t.Fatalf("failed observation lost its error or prerequisite classification: %+v %v", state, err)
+			if err != nil || !state.Available || state.Active || state.Ready {
+				t.Fatalf("preview invented Docker state: %+v %v", state, err)
 			}
-			var exit *exec.ExitError
-			if !errors.As(err, &exit) || exit.ExitCode() != 14 {
-				t.Fatalf("lost systemctl failure: %v", err)
-			}
-			if err := SetDocker(context.Background(), true, nil); err == nil {
-				t.Fatal("an unavailable user bus allowed installation")
-			}
-			assertCalls(t, calls, dockerShowCall, dockerShowCall)
 		})
 	}
 }
 
-func TestDockerMissingSetupRequirementsPreserveTheInstallerFailure(t *testing.T) {
-	for _, diagnostic := range []string{
-		"Missing system requirements.\n# Add subuid entry for account\n# Add subgid entry for account",
-		"Missing system requirements.\n# Install iptables\n# Load nf_tables module",
-	} {
-		calls, _ := fakeRootlessDocker(t, "LoadState=not-found\nActiveState=inactive\n")
-		t.Setenv("DOCKER_TEST_SETUP_ERROR", diagnostic)
-		err := SetDocker(context.Background(), true, nil)
-		var prerequisite *PrerequisiteError
-		var exit *exec.ExitError
-		if !errors.As(err, &prerequisite) || !errors.As(err, &exit) || exit.ExitCode() != 12 {
-			t.Fatalf("missing setup requirements lost actionable classification or cause: %v", err)
+func TestDockerCancellationPreventsMutationAndSurvivesPostApplyRead(t *testing.T) {
+	for _, afterApply := range []bool{false, true} {
+		for _, enabled := range []bool{false, true} {
+			fakeSystemDocker(t, dockerReport("loaded", "inactive"), dockerReport("loaded", "inactive"))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if !afterApply {
+				cancel()
+			}
+			applied := false
+			err := setDocker(ctx, enabled, nil, func(context.Context, bool) error {
+				applied = true
+				cancel()
+				return nil
+			})
+			if !errors.Is(err, context.Canceled) || applied != afterApply {
+				t.Fatalf("canceled mutation = %v, applied %v, want %v", err, applied, afterApply)
+			}
 		}
-		want := append([]string{dockerShowCall}, dockerInstallCalls()...)
-		assertCalls(t, calls, append(want, "setup install --force")...)
+	}
+}
+
+func TestDockerStatusTimeoutBoundsUnitReadsAndSocketPing(t *testing.T) {
+	for _, stage := range []string{"units", "ping"} {
+		t.Run(stage, func(t *testing.T) {
+			_, dir := fakeSystemDocker(t, dockerReport("loaded", "active"), dockerReport("loaded", "active"))
+			previous := statusTimeout
+			statusTimeout = 50 * time.Millisecond
+			t.Cleanup(func() { statusTimeout = previous })
+			if stage == "units" {
+				if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte("#!/bin/sh\nexec /bin/sleep 10\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				dockerTestDial(t, func(ctx context.Context, _, _ string) (net.Conn, error) {
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(100 * time.Millisecond):
+						return nil, context.DeadlineExceeded
+					}
+				})
+			}
+			_, err := DockerStatus(context.Background())
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("unbounded or lost %s timeout: %v", stage, err)
+			}
+		})
+	}
+}
+
+func TestDockerPingBodyReadFailureRemainsAnError(t *testing.T) {
+	fakeSystemDocker(t, dockerReport("loaded", "active"), dockerReport("loaded", "active"))
+	dockerTestDial(t, func(context.Context, string, string) (net.Conn, error) {
+		client, server := net.Pipe()
+		go func() {
+			defer func() { _ = server.Close() }()
+			if _, err := http.ReadRequest(bufio.NewReader(server)); err != nil {
+				return
+			}
+			_, _ = io.WriteString(server, "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nOK")
+		}()
+		return client, nil
+	})
+	state, err := DockerStatus(context.Background())
+	if !state.Active || state.Ready || state.NeedsLogin || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("truncated ping body hid its cause: %+v %v", state, err)
 	}
 }

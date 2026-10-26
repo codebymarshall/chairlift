@@ -219,7 +219,7 @@ def no_descriptor(context):
 
 @stub("features-developer")
 def developer_options(context):
-    """Running WSL guests and Docker CLI, but no installed rootless user daemon."""
+    """Running WSL guests and image-provided, inactive system Docker units."""
     fake_executable(context, "nsl", _recorder(context) + """
 case "$1" in
   list) printf '%s\n' 'VM\tSTATE\tIMAGE\tRESOURCES\tDATA DISK' 'shared\trunning\t-\t4 CPUs, 8 GiB\t20 GiB' '' 'MACHINE\tSTATE\tIMAGE\tTIER\tDEFAULT' 'debian\trunning\tdebian:13\tshared\t*' ;;
@@ -235,27 +235,70 @@ case "$1" in
 esac
 exit 0
 """)
-    fake_executable(context, "systemctl", _recorder(context) + """
-if [ "$1" = --user ]; then shift; fi
-case "$1" in
-  show) printf '%s\n' 'LoadState=not-found' 'ActiveState=inactive' ;;
-esac
-exit 0
-""")
+    docker_inactive(context)
     fake_executable(context, "brew", _recorder(context) + """
 case "$1" in
   --version) echo 'Homebrew 5.0.0' ;;
-  info) echo '{"formulae":[{"name":"docker","installed":[{"version":"29.0"}]}],"casks":[]}' ;;
+  info) echo '{"formulae":[],"casks":[]}' ;;
 esac
 exit 0
+""")
+    fake_executable(context, "code", _recorder(context) + "exit 97\n")
+    context.launch_env["SETUP_CHECKER_FILE"] = os.path.join(context.home, ".local", "share", "ublue", "setup_versioning.json")
+
+
+@stub("features-developer-packages")
+def developer_packages(context):
+    """A local optional collection, parsed through the real Brewfile reader."""
+    directory = os.path.join(context.scenario_dir, "bundles")
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "dakota-dev-flatpaks.Brewfile")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(
+            '# Developer applications\n'
+            'brew "just"\n'
+            'cask "visual-studio-code"\n'
+            'flatpak "io.podman_desktop.PodmanDesktop"\n'
+        )
+
+def docker_inactive(context):
+    """Both image-provided system units are readable and stopped."""
+    fake_executable(context, "systemctl", _recorder(context) + """
+case "$1" in
+  show) printf '%s\\n' 'LoadState=loaded' 'ActiveState=inactive' ;;
+  *) exit 1 ;;
+esac
+""")
+
+
+def docker_held_failure(context):
+    """Read both SetDocker prerequisites, then hold/fail its Verify read."""
+    release = os.path.join(context.scenario_dir, "release-docker-status")
+    reads = os.path.join(context.scenario_dir, "docker-prerequisite-reads")
+    fake_executable(context, "systemctl", _recorder(context) + f"""
+case "$1" in
+  show)
+    count=0
+    [ ! -f "{reads}" ] || count=$(cat "{reads}")
+    count=$((count + 1))
+    printf '%s\\n' "$count" > "{reads}"
+    if [ "$count" -le 2 ]; then
+      printf '%s\\n' 'LoadState=loaded' 'ActiveState=inactive'
+      exit 0
+    fi
+    while [ ! -f "{release}" ]; do sleep 0.1; done
+    echo 'Failed to connect to system scope bus: No medium found' >&2
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
 """)
 
 
 @stub("features-docker-active")
 def docker_active(context):
-    """A running user service with no responding Docker socket."""
+    """Both system units run, but the fixed system socket does not respond."""
     fake_executable(context, "systemctl", _recorder(context) + """
-if [ "$1" = --user ]; then shift; fi
 case "$1" in
   show) printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' ;;
   *) exit 1 ;;
@@ -263,13 +306,80 @@ esac
 """)
 
 
-@stub("features-docker-no-session")
-def docker_no_session(context):
-    """Native systemctl's error when this account has no reachable user bus."""
+@stub("features-docker-no-manager")
+def docker_no_manager(context):
+    """A failed, unprivileged read of the system manager."""
     fake_executable(context, "systemctl", _recorder(context) + """
-echo 'Failed to connect to user scope bus via local transport: No medium found' >&2
+echo 'Failed to connect to system scope bus: No medium found' >&2
 exit 1
 """)
+
+
+@stub("features-docker-missing")
+def docker_missing(context):
+    """The system image has neither required Docker unit."""
+    fake_executable(context, "systemctl", _recorder(context) + """
+case "$1" in
+  show) printf '%s\\n' 'LoadState=not-found' 'ActiveState=inactive' ;;
+  *) exit 1 ;;
+esac
+""")
+
+
+@stub("features-docker-masked")
+def docker_masked(context):
+    """A loaded service cannot make an inactive masked socket usable."""
+    fake_executable(context, "systemctl", _recorder(context) + """
+case "$1 $2" in
+  'show docker.service') printf '%s\\n' 'LoadState=loaded' 'ActiveState=inactive' ;;
+  'show docker.socket') printf '%s\\n' 'LoadState=masked' 'ActiveState=inactive' ;;
+  *) exit 1 ;;
+esac
+""")
+
+
+@stub("features-docker-active-missing-socket")
+def docker_active_missing_socket(context):
+    """A running service remains stoppable when its paired unit is missing."""
+    fake_executable(context, "systemctl", _recorder(context) + """
+case "$1 $2" in
+  'show docker.service') printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' ;;
+  'show docker.socket') printf '%s\\n' 'LoadState=not-found' 'ActiveState=inactive' ;;
+  *) exit 1 ;;
+esac
+""")
+
+
+@stub("features-docker-second-read-fails")
+def docker_second_read_fails(context):
+    """One active unit is not an observed state when its paired read fails."""
+    fake_executable(context, "systemctl", _recorder(context) + """
+case "$1 $2" in
+  'show docker.service') printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' ;;
+  'show docker.socket') echo 'Failed to read docker.socket' >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+""")
+
+
+@stub("features-vscode-settings")
+def vscode_settings(context):
+    """An existing native VS Code JSONC configuration must remain untouched."""
+    context.vscode_original = b'// Keep my preferences\n{\n  "editor.fontSize": 17,\n}\n'
+    path = os.path.join(context.home, ".config", "Code", "User", "settings.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(context.vscode_original)
+
+
+@stub("features-vscode-bad-marker")
+def vscode_bad_marker(context):
+    """A malformed record must not become a false Docker-success toast."""
+    path = os.path.join(context.home, ".local", "share", "ublue", "setup_versioning.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("not JSON")
+    context.launch_env["SETUP_CHECKER_FILE"] = path
 
 def _shell_extensions(context, enabled, missing=False):
     installed = "" if missing else "tailscale-gnome-qs@tailscale-qs.github.io\nsyncthing-toggle@projectbluefin.io"

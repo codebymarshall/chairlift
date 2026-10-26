@@ -173,6 +173,18 @@ without opening a terminal.
 
 ![Features](screenshots/4-features.png)
 
+The **Setup activity** checklist at the top shows the current operation and
+its outcome. It names real setup stages and pulses while work is running;
+it does not estimate percentages. Failures, authentication cancellations, and
+awaiting a new login remain distinguishable from completion. Failed optional
+setup can be retried without repeating a completed access grant; waiting for a
+new login is not a failure to retry.
+
+Expand **Developer Mode**, **WSL Mode**, **Enable Docker**, or **Gaming Mode**
+to read the packages and changes involved, like App collections on Apps.
+Clicking the row expands it; the separate switch starts the action. These
+lists are informational, not individual package choices or a live package log.
+
 **Desktop Integrations** offers **Tailscale Integration** and **Sync Folder
 Integration** switches for GNOME Quick Settings. Tailscale's initial switch
 position is on and Sync Folder's is off; once GNOME answers, the switches show
@@ -183,31 +195,56 @@ Changing a switch enables or disables that extension for your account; it does
 not install software or start Tailscale or Sync Folder services. Preview mode
 leaves GNOME preferences unchanged.
 
-**Developer tools** lets you run containers and virtual machines, and use USB
-and serial hardware, without being asked for permission each time. It needs
+**Developer tools** start with **Developer Mode**, which lets you run containers
+and virtual machines, and use USB and serial hardware, without being asked for permission each time. It needs
 your administrator password, and takes effect after you log out and back in.
 Switching it on also installs the Dev Container CLI (`devcontainer`) when
 Homebrew is available; if that install fails you are told, and developer access
 stays on.
 A distribution may also configure it to install the Pulp feed reader and stage
 a curated list of developer feeds in your home folder once you switch it on —
-both are off by default, and turning Developer tools back off never removes the
+both are off by default, and turning Developer Mode back off never removes the
 reader, the file, or anything you imported from it.
 Developer options also offer **WSL Mode** (nsl persistent Linux machines by
 default on x86-64 Linux, with Lima Ubuntu LTS as an alternative on amd64 or arm64)
-and **Enable Docker**. WSL needs hardware virtualization and access to
-`/dev/kvm`; permission grants require a new login. Docker installs its engine
-and tools through Homebrew and runs rootlessly for this account, without
-administrator access. A ready Docker socket, not installed CLI tools, confirms
-success. Turning it off keeps your containers and installed packages. Missing
-UID-map tools or an unavailable user session keep the switch visible but locked,
-with an explanation; a missing Docker installation can be installed with one click.
+and **Enable Docker**. Turning either on first enables Developer Mode if it
+is off, using the same administrator authentication as its own switch. If
+authentication is canceled or fails, WSL or Docker setup does not start.
+Once developer access is granted, a later WSL or Docker failure leaves it
+granted; retry the child action after fixing its reported requirement.
+Turning either child off does not turn Developer Mode off. Preview mode
+changes none of the observed switch states.
+WSL also needs hardware virtualization and access to `/dev/kvm`; its KVM
+permission grant may ask for authentication and requires a new login.
+Docker uses the system's existing Docker CE installation. Its expanded package
+list labels `containerd.io`, `docker-buildx-plugin`, `docker-ce`, `docker-ce-cli`,
+and `docker-compose-plugin` as **Provided by system image**, not downloads this
+action installs. Administrator approval through the fixed Docker helper enables
+the computer's service and socket and grants your account access; this can ask
+for authentication again after Developer Mode. Newly granted access requires
+logging out and back in. Until then, **Awaiting new login** is not ready.
+A responding `/var/run/docker.sock`, not installed CLI tools or an active unit
+alone, confirms readiness. Turning Docker off stops both system units for all
+accounts but keeps containers, installed packages, group membership, and
+Developer Mode. Missing system units or helper actions require an image or
+administrator fix; no second Homebrew engine or user service is installed.
+Docker does not require Homebrew or UID-map tools. A known running daemon stays
+stoppable even if its socket check fails.
+
+Enable also attempts native Microsoft VS Code setup separately; it does not
+install the editor. It seeds defaults only if settings are absent and installs
+Bluefin's Dev Containers, Remote SSH, and Container Tools extensions. Existing
+settings, including JSONC comments and symlinks, stay untouched. Successful setup
+records the upstream version-1 marker; later runs check extension IDs rather
+than trusting that marker alone. Missing native VS Code or an editor setup error
+stays retryable without undoing Docker or developer access. Preview writes no
+settings or marker and launches no editor CLI.
 Use **Virtual Machine Engine** to choose the built-in engine or Lima;
 both run Ubuntu. An existing Lima Ubuntu machine is kept as the choice when no
 built-in machine exists, rather than creating a second one. Likewise, a Debian
 machine the built-in engine made in an earlier release keeps being used, and
 the chooser says so, instead of an Ubuntu machine being created beside it.
-**Gaming** is a single toggle that installs gaming tools (ProtonPlus,
+**Gaming** offers a single **Gaming Mode** toggle that installs gaming tools (ProtonPlus,
 Protontricks, GOverlay, MangoHud) system-wide for every account on the
 computer, which may ask for an administrator password. Turning it off removes
 each tool from every scope it is installed in, leaving in place any copy that
@@ -229,13 +266,13 @@ service crashes — rather than displaying a false enabled or running state.
 Printing through a real device has not yet been verified against hardware.
 **Optional Features** is the distribution's own feature manager; it is hidden
 where the distribution ships none. When a computer offers none of these —
-no Developer tools, no Gaming, no Printers, no optional features — the page
+no Developer Mode, no Gaming Mode, no Printers, no optional features — the page
 says **Nothing to Set Up Here** rather than showing an empty screen.
 
 Agent Mode and Troubleshooting have their own **Agents** page.
-Developer actions show an activity spinner, and Gaming actions show step
-progress while their changes are running; errors are shown immediately rather
-than hidden behind an older message.
+Developer and Gaming actions retain their row feedback alongside the shared
+Setup activity checklist; errors are shown immediately rather than hidden
+behind an older message.
 
 ---
 
@@ -364,10 +401,11 @@ RemoteDesktop API and frames through its ScreenCast API. Always `--dry-run`,
 so nothing on the capture machine changes. Hardware the runner doesn't have
 is stubbed, and `make ci` checks no released binary can read those stubs.
 
-The capture session is not a booted OS-update target, and its Docker session
-prerequisites may be unavailable. A dry-run capture never installs or starts
-Docker; the separate live Docker integration gate proves that path. Capture
-needs podman and Go on the host.
+The capture session is not a booted OS-update target, and its system Docker
+units may be unavailable. A dry-run capture never installs, starts, or stops
+Docker. Live activation belongs to `make e2e-docker`
+(`TestIntegrationDockerSystem` in `test/e2e/docker_system_test.go`), not screenshot
+evidence. Capture needs podman and Go on the host.
 
 Run it locally when something's appearance changes and you want to preview
 before a release. It isn't regenerated per commit, since font and theme

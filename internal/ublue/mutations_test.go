@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +83,16 @@ func TestExportedActionsSendTheirOwnCommandWord(t *testing.T) {
 			wantArgs: []string{ubluehelper.CommandDXDisable},
 		},
 		{name: "EnableKVMAccess", call: EnableKVMAccess, wantArgs: []string{ubluehelper.CommandKVMEnable}},
+		{
+			name:     "SetDocker enabled",
+			call:     func(ctx context.Context) error { return SetDocker(ctx, true) },
+			wantArgs: []string{ubluehelper.CommandDockerEnable},
+		},
+		{
+			name:     "SetDocker disabled",
+			call:     func(ctx context.Context) error { return SetDocker(ctx, false) },
+			wantArgs: []string{ubluehelper.CommandDockerDisable},
+		},
 		{
 			name:     "Restart",
 			call:     Restart,
@@ -170,6 +182,8 @@ func TestEmittedCommandsAreAllHelperSupported(t *testing.T) {
 		ubluehelper.CommandAutoDisable,
 		ubluehelper.CommandDriverSwitch,
 		ubluehelper.CommandKVMEnable,
+		ubluehelper.CommandDockerEnable,
+		ubluehelper.CommandDockerDisable,
 	}
 	for _, command := range emitted {
 		if !supported[command] {
@@ -367,5 +381,66 @@ func TestStatusCachedDetectsOnceAndRepeats(t *testing.T) {
 	}
 	if calls > 1 {
 		t.Errorf("StatusCached ran detection %d times, want at most 1", calls)
+	}
+}
+
+func TestSetDockerUsesFixedHelperAndPreservesAuthenticationFailures(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		for _, code := range []int{0, 1, 126, 127} {
+			t.Run(strconv.FormatBool(enabled)+"/"+strconv.Itoa(code), func(t *testing.T) {
+				path := withJournalSink(t)
+				fake := writeCustomFakePkexec(t, "#!/bin/sh\necho 'helper diagnostic' >&2\nexit "+strconv.Itoa(code)+"\n")
+				previous := pkexecCommand
+				pkexecCommand = fake
+				t.Cleanup(func() { pkexecCommand = previous })
+				err := SetDocker(context.Background(), enabled)
+				if (err == nil) != (code == 0) {
+					t.Fatalf("helper exit %d returned %v", code, err)
+				}
+				if code != 0 {
+					var exit *exec.ExitError
+					if !errors.As(err, &exit) || exit.ExitCode() != code || !strings.Contains(err.Error(), "helper diagnostic") {
+						t.Fatalf("lost original helper error: %v", err)
+					}
+					if pkexec.IsAuthDismissed(err) != (code == 126) {
+						t.Fatalf("authentication failure misclassified: %v", err)
+					}
+				}
+				command := "docker-disable"
+				if enabled {
+					command = "docker-enable"
+				}
+				entries := readJournal(t, path)
+				want := []string{fake, "/usr/bin/chairlift-helper", command}
+				if len(entries) != 2 || !reflect.DeepEqual(entries[0].WouldRun, want) || entries[0].Action != command || entries[1].Action != command {
+					t.Fatalf("Docker helper escaped fixed boundary/journal: %+v", entries)
+				}
+				outcome := journal.OutcomeSucceeded
+				if code == 126 || code == 127 {
+					outcome = journal.OutcomeRefused
+				} else if code != 0 {
+					outcome = journal.OutcomeFailed
+				}
+				if entries[1].Outcome != outcome {
+					t.Fatalf("journal outcome = %+v, want %s", entries[1], outcome)
+				}
+			})
+		}
+	}
+}
+
+func TestSetDockerPreservesCancellation(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		withJournalSink(t)
+		fake := writeCustomFakePkexec(t, "#!/bin/sh\nexit 0\n")
+		previous := pkexecCommand
+		pkexecCommand = fake
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := SetDocker(ctx, enabled)
+		pkexecCommand = previous
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Docker mutation lost cancellation: %v", err)
+		}
 	}
 }

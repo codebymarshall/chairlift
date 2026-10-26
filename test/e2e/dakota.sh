@@ -119,7 +119,7 @@ for name in CHAIRLIFT_ATSPI_TAGS CHAIRLIFT_ATSPI_KNOWN_ISSUES; do
     [ -n "${!name:-}" ] && ENVIRONMENT+=(-e "$name=${!name}")
 done
 
-# The live Docker gate needs a real delegated user manager and nested UID maps.
+# The live Docker gate provisions an image-supplied system daemon and real PolicyKit.
 # --privileged is permitted ONLY inside rootless Podman: it removes the outer
 # container's seccomp/cgroup restrictions without acquiring host root powers.
 if [ "${CHAIRLIFT_DOCKER_INTEGRATION:-}" = 1 ]; then
@@ -138,19 +138,30 @@ if [ "${CHAIRLIFT_DOCKER_INTEGRATION:-}" = 1 ]; then
         -e CHAIRLIFT_ATSPI_PYTHON=/opt/chairlift-atspi-venv/bin/python
     )
     NAME="chairlift-docker-e2e-$$"
-    cleanup_docker() { podman rm --force "$NAME" >/dev/null; }
+    DOCKER_FIXTURE="localhost/chairlift-system-docker-e2e:$$"
+    cleanup_docker() {
+        status=$?
+        if [ "$status" -ne 0 ]; then
+            podman exec --user 0 "$NAME" journalctl -b --unit docker.service --unit docker.socket --unit containerd.service --no-pager || true
+        fi
+        podman rm --force "$NAME" >/dev/null 2>&1 || true
+        podman image rm "$DOCKER_FIXTURE" >/dev/null 2>&1 || true
+    }
     trap cleanup_docker EXIT
-    podman run --detach --name "$NAME" --pull=missing --userns=keep-id --user 0 \
+    podman build --pull=never --build-arg DAKOTA_BASE="$IMAGE" \
+        -f "$ROOT/test/e2e/docker-system.Containerfile" -t "$DOCKER_FIXTURE" "$ROOT/test/e2e"
+    podman run --detach --name "$NAME" --pull=never --userns=keep-id --user 0 \
         --privileged --systemd=always --tmpfs /tmp:rw,mode=1777 \
         --mount type=bind,source=/dev/null,destination=/proc/cmdline,ro \
         --mount type=bind,source=/usr/bin/false,destination=/usr/libexec/bootc-update-stage,ro \
         --tmpfs /usr/share/chairlift:ro,notmpcopyup \
         "${MOUNTS[@]}" "${ENVIRONMENT[@]}" -e CHAIRLIFT_DOCKER_INTEGRATION=1 \
-        -w /opt/chairlift-checkout "$IMAGE" /usr/lib/systemd/systemd --unit=multi-user.target
+        -w /opt/chairlift-checkout "$DOCKER_FIXTURE" /usr/lib/systemd/systemd --unit=basic.target
     podman exec --user 0 "$NAME" bash /opt/chairlift-checkout/test/e2e/docker_fixture.sh "$(id -u)" "$(id -g)" "$ROOT"
     podman exec --user "$(id -u):$(id -g)" --workdir "$ROOT" "${ENVIRONMENT[@]}" \
         -e XDG_RUNTIME_DIR=/tmp/chairlift-docker-runtime -e CHAIRLIFT_DOCKER_INTEGRATION=1 "$NAME" \
         "$CONTAINER_GOROOT/bin/go" test "$@" ./test/e2e
+    podman exec --user 0 "$NAME" bash /opt/chairlift-checkout/test/e2e/docker_fixture.sh "$(id -u)" "$(id -g)" "$ROOT" verify
     exit $?
 fi
 

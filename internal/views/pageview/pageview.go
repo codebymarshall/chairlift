@@ -2,10 +2,12 @@
 package pageview
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/projectbluefin/chairlift/internal/devtools"
 	"github.com/projectbluefin/chairlift/internal/gpu"
 	"github.com/projectbluefin/chairlift/internal/homebrew"
 	"github.com/projectbluefin/chairlift/internal/pkexec"
@@ -394,6 +396,37 @@ func DeveloperResultSubtitle(enabled bool) string {
 		return "Log out and back in to finish turning this on."
 	}
 	return "Log out and back in to finish turning this off."
+}
+
+// DockerControlAllowed follows the requested direction, including after a
+// successful mutation changes which helper action the switch would dispatch.
+func DockerControlAllowed(active, canEnable, canDisable bool) bool {
+	return (!active && canEnable) || (active && canDisable)
+}
+
+// DockerSubtitle distinguishes system activation from this session's access.
+func DockerSubtitle(state devtools.DockerState, err error) string {
+	switch {
+	case state.NeedsLogin || errors.Is(err, devtools.ErrDockerNewLogin):
+		return "Log out and back in to use Docker with your new access."
+	case state.Unavailable != "":
+		return state.Unavailable
+	case state.Ready:
+		return "System Docker is ready for this account."
+	case state.Active:
+		return "Docker is running, but its socket is not responding."
+	case err != nil:
+		return "Couldn't check Docker's system service."
+	default:
+		return "Enables Developer Mode first if needed, then system Docker for all accounts. Administrator approval is required. No engine packages are installed."
+	}
+}
+
+func DockerEditorFailure(preview bool) string {
+	if preview {
+		return "[DRY-RUN] VS Code setup needs attention; no Docker changes made. See the application log for details."
+	}
+	return "Docker access is enabled, but VS Code setup couldn't finish. See the application log for details."
 }
 
 // GamingCheckingSubtitle is the gaming row's subtitle while ChairLift is still

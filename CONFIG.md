@@ -173,15 +173,40 @@ section above); administrators can remove them when convenient.
 - `printers_group`: Printer applications; one switch per driver family (Ghostscript, HPLIP, Gutenprint), each a rootless Podman quadlet under `~/.config/containers/systemd` driven with `systemctl --user`, with no `pkexec` route (shown only when `podman` is on `$PATH`). Each unit runs its family's `ghcr.io/projectbluefin/<id>-printer-app:stable` image and is kept current by `podman-auto-update.timer`, which turning a family on enables. The application is published on `127.0.0.1` only ([ADR-0020](docs/adr/0020-printer-apps-loopback-only-on-moving-stable-tag.md)): its unauthenticated settings page and IPP are reachable only from this computer (`http://localhost:<port>/`, `ipp://localhost:<port>/ipp/print`), so other computers on the network cannot print to it and it is not advertised over DNS-SD. The rows evaluate systemd state, journal logs, and container images to diagnose and surface actionable failures (device access, image availability, plugin verification, service crash) rather than a false enabled indicator
 
 The Developer group also offers WSL Mode (nsl by default, with Lima as alternative)
-and rootless Docker. nsl requires an x86-64 Linux host; Lima supports amd64 and
-arm64. Both require hardware virtualization and access to `/dev/kvm`. Missing
-fixed helper actions disable only the affected privileged switches, not their
-discoverability; KVM permission changes require a new login. Docker installs its
-engine and tools through Homebrew and manages this account's user service,
-without a helper or group change. It requires native UID-map helpers and a
-user session; readiness comes from `$XDG_RUNTIME_DIR/docker.sock`, not CLI
-presence. Disable keeps the installation and data. No user-configurable
-privileged argv is accepted.
+and system Docker. Turning either on first enables Developer Mode when it is
+off, through the existing fixed `dx-enable` helper under one shared action gate.
+Authentication failure or cancellation aborts child setup; a later child failure
+keeps granted developer access, and turning a child off never demotes it. Direct
+and implicit promotion use the same follow-on opt-ins above. Dry-run preserves
+observed switches; the shared Setup activity checklist distinguishes preview,
+cancellation, failure, and completion, and failed stages remain retryable.
+nsl requires an x86-64 Linux host; Lima supports amd64 and arm64. Both require
+hardware virtualization and access to `/dev/kvm`; its fixed permission grant
+may also ask for authentication and requires a new login. Missing helper
+actions leave affected controls visible but insensitive.
+Docker uses image-provided Docker CE, not a Homebrew engine or user service.
+Its package disclosure labels `containerd.io`, `docker-buildx-plugin`, `docker-ce`,
+`docker-ce-cli`, and `docker-compose-plugin` as **Provided by system image**;
+they are RPM provenance, not downloads this action requests. The existing fixed
+`docker-enable` helper grants account access and enables `docker.service` and
+`docker.socket`; it may ask for administrator approval separately from
+`dx-enable`. Missing image units need an image/administrator fix, not a package
+install from ChairLift. Homebrew and UID-map tools are not Docker prerequisites.
+Readiness requires `/var/run/docker.sock` to answer HTTP 200 `OK`; installed
+CLI tools or active units alone are insufficient. Newly granted group access
+needs a new login, and awaiting login is not ready. A known active unit remains
+stoppable with a supported disable action even after a socket probe failure.
+Disable stops both system units for all accounts and keeps packages, data,
+group membership, and Developer Mode.
+Docker enable also attempts native Microsoft VS Code setup as a separate optional
+outcome, without installing the editor. It seeds defaults only when
+`~/.config/Code/User/settings.json` is absent, preserving existing JSONC and
+symlinks, and installs Bluefin DX's Dev Containers, Remote SSH, and Container
+Tools extensions. The upstream version-1 marker is written only after success
+and checked against installed extensions on later runs. A missing native `code`
+or an editor setup failure stays visible and retryable without undoing access.
+Preview writes no settings or marker and launches no editor CLI. No
+user-configurable privileged argv is accepted.
 The **Virtual Machine Engine** chooser (Built-in for nsl, or Lima) changes the backend used in the current window;
 `wsl_backend` configures the initial choice. With the nsl default, an existing
 Lima Ubuntu machine and no ChairLift nsl machine select Lima instead of creating

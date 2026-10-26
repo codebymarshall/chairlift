@@ -140,27 +140,68 @@ to ChairLift's log, which is where to look when filing a bug report.
 | Gaming Mode | `gaming_group` | Installs the gaming tools stack (ProtonPlus, Protontricks, GOverlay, MangoHud) system-wide (`flatpak install --system`) from the system Flathub remote Bluefin-family images configure, authorized by Flatpak's own PolicyKit rather than by ChairLift, with a single toggle. A copy an earlier release installed per-user counts as installed. Turning off removes each component from every scope it is installed in (prompting for confirmation), leaving in place a system copy the OS image declares it ships (Flatpak `preinstall.d` or `/usr/share/ublue-os/homebrew/system-flatpaks.Brewfile`); shown only when `/usr/share/ublue-os/image-info.json` is present. Components an earlier release installed that this build no longer manages (Steam, ProtonUp-Qt, Flatseal) are cleaned up the same way and noted in the status |
 | Printers | `printers_group` | Printer applications: one switch per driver family (Ghostscript, HPLIP, Gutenprint), each a rootless Podman quadlet under `~/.config/containers/systemd` driven with `systemctl --user`. Crosses no privilege boundary, so it has no `pkexec` route. Hidden where `podman` is absent. Turning a family on requires cosign to verify `ghcr.io/projectbluefin/<id>-printer-app:stable` against its publishing workflow, then writes only the verified digest, without registry auto-update ([ADR-0023](adr/0023-verify-printer-images-before-installing.md)). Older units require disable/re-enable to migrate, and their row's subtitle says so; verified automatic refresh is not yet implemented. The port is published on `127.0.0.1` only ([ADR-0020](adr/0020-printer-apps-loopback-only-on-moving-stable-tag.md)), so IPP and the unauthenticated web administration are reachable only from this computer; there is no LAN printing or DNS-SD advertisement. The rows evaluate systemd state, journal logs, and container images to diagnose actionable failures (device access, image availability, plugin verification, service crash) rather than a false enabled indicator |
 
+**Setup activity** appears at the top of Features for Developer Mode, WSL,
+Docker, and Gaming operations. Its bounded checklist names actual stages,
+pulses during work, and distinguishes completion, failure, cancellation,
+awaiting a new login, and preview without percentage estimates. Awaiting login
+is not ready and is not a failed action to repeat. Each of **Developer Mode**,
+**WSL Mode**, **Enable Docker**, and **Gaming Mode** expands to disclose its
+packages and changes; the independent suffix switch runs the action. Lists
+name directly requested software or, for Docker, image-provided RPM provenance,
+not every package-manager dependency, and offer no individual install choices.
+An opaque bundle command does not produce a
+fabricated per-package completion stream.
+
 Developer options include WSL Mode (an Ubuntu machine in systemd-vmspawn via
-nsl by default, or Ubuntu LTS in Lima). nsl needs an x86-64 Linux host;
-Lima supports amd64 and arm64. Both require hardware virtualization and
-`/dev/kvm` access. **Enable Docker** installs the CLI, `docker-engine`,
-rootlesskit, slirp4netns, Docker Compose, lazydocker, and dive through Homebrew.
-It configures a rootless `docker.service` for this account, without administrator
-access or developer-group changes. It needs a running user session and the OS's
-`newuidmap`/`newgidmap` helpers; the setup tool validates subordinate UID/GID
-configuration. Readiness requires the account's `$XDG_RUNTIME_DIR/docker.sock`
-to answer Docker's ping. An active unit or installed CLI alone is not ready.
-Turning Docker off stops/disables only the user service and retains packages,
-the unit, and container data. Missing UID-map tools or an unreachable user session
-leave the control visible but insensitive with an explanation. The setup tool
-reports missing subordinate-ID or networking configuration as an administrator
-requirement; after it is fixed, installation can be retried.
+nsl by default, or Ubuntu LTS in Lima). Turning WSL or Docker on while
+Developer Mode is off first runs the existing fixed
+`pkexec /usr/bin/chairlift-helper dx-enable` prerequisite. Authentication
+failure or cancellation aborts child setup. The Developer Mode switch is
+confirmed only after the helper succeeds; a later child failure keeps granted
+developer access. Turning WSL or Docker off does not demote Developer Mode,
+and dry-run previews leave observed switches unchanged. Direct and implicit
+promotions share the same post-enable work and configuration opt-ins.
+nsl needs an x86-64 Linux host; Lima supports amd64 and arm64. Both require
+hardware virtualization and `/dev/kvm` access, whose fixed `kvm-enable`
+grant may also require authentication and a new login.
+**Enable Docker** uses the image's native Docker CE system service and socket.
+Its expander names `containerd.io`, `docker-buildx-plugin`, `docker-ce`,
+`docker-ce-cli`, and `docker-compose-plugin` as **Provided by system image**,
+not downloads from Homebrew. The existing fixed `docker-enable` helper grants
+your account Docker group access and enables both `docker.service` and
+`docker.socket`. This may ask for administrator approval separately from the
+Developer Mode prerequisite. No second Homebrew engine or user service is
+installed. Missing image units or helper actions require an image or
+administrator fix; Homebrew, UID-map tools, and a user service manager are not
+Docker prerequisites.
+
+Readiness requires HTTP 200 `OK` from `/var/run/docker.sock`, independent of
+`DOCKER_HOST` or `XDG_RUNTIME_DIR`; installed CLI tools or active units alone
+are insufficient. Newly granted group access needs a new login (`NeedsLogin`),
+shown as awaiting login rather than ready or a generic daemon failure. Both
+system units must be read before their active state is trusted; a later socket
+failure retains known active state so a supported stop stays available.
+Turning Docker off uses fixed `docker-disable` to stop both system units for
+all accounts, retaining packages, container data, group membership, and
+Developer Mode.
+
+Docker enable also attempts native Microsoft VS Code setup as a separate
+optional outcome; it does not install the editor. It seeds defaults only when
+`~/.config/Code/User/settings.json` is absent, preserving existing JSONC and
+symlinks, and installs Dev Containers (`ms-vscode-remote.remote-containers`),
+Remote SSH (`ms-vscode-remote.remote-ssh`), and Container Tools
+(`ms-azuretools.vscode-containers`). The upstream marker
+`${SETUP_CHECKER_FILE:-$HOME/.local/share/ublue/setup_versioning.json}` records
+`.version.user.vscode == "1"` only after successful setup; an existing marker
+is checked against installed extension IDs, not trusted by itself. Missing
+native `code` or an editor failure does not reverse access. Failed optional
+stages can be retried without repeating a completed privileged enable. Preview
+writes no settings or marker and launches no editor CLI.
+
 A confirmed Developer Mode enable also installs the Dev Container CLI
 (`devcontainer`) when Homebrew is available; an install failure does not reverse
-developer access. IDEs and editors are installed from Bazaar or Apps. The fixed
-`kvm-enable` action still grants KVM access, effective after a new login. The
-existing system-Docker helper commands and policies remain installed, but this
-rootless GUI action does not invoke them.
+developer access. Editor selection/installation remains in Bazaar or Apps.
+The fixed `kvm-enable` action still grants KVM access, effective after a new login.
 
 The **Virtual Machine Engine** chooser (Built-in for nsl, or Lima) changes the current window's backend without rewriting
 YAML. `wsl_backend` supplies the initial choice; an existing Lima Ubuntu machine

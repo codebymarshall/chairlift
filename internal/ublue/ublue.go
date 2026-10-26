@@ -299,7 +299,22 @@ func SetDeveloperMode(ctx context.Context, enabled bool) (skipped []string, err 
 
 // EnableKVMAccess grants this account access to hardware virtualization.
 func EnableKVMAccess(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, ubluehelper.DefaultTimeout+AuthenticationAllowance)
+	defer cancel()
 	_, _, err := runHelper(ctx, pkexecCommand, ubluehelper.CommandKVMEnable)
+	return err
+}
+
+// SetDocker enables or disables image-provided system Docker. The helper grants
+// the invoking account access on enable; disable retains that access and data.
+func SetDocker(ctx context.Context, enabled bool) error {
+	ctx, cancel := context.WithTimeout(ctx, ubluehelper.DefaultTimeout+AuthenticationAllowance)
+	defer cancel()
+	command := ubluehelper.CommandDockerDisable
+	if enabled {
+		command = ubluehelper.CommandDockerEnable
+	}
+	_, _, err := runHelper(ctx, pkexecCommand, command)
 	return err
 }
 

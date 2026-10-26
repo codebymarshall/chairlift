@@ -1,21 +1,20 @@
 package views
 
 import (
+	"context"
+	"errors"
 	"log"
 
-	"github.com/projectbluefin/chairlift/internal/capability"
-	"github.com/projectbluefin/chairlift/internal/developerfeeds"
 	"github.com/projectbluefin/chairlift/internal/devmenu"
+	"github.com/projectbluefin/chairlift/internal/devsetup"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/gaming"
-	"github.com/projectbluefin/chairlift/internal/homebrew"
 	"github.com/projectbluefin/chairlift/internal/imageinfo"
 	"github.com/projectbluefin/chairlift/internal/pkexec"
 	"github.com/projectbluefin/chairlift/internal/ublue"
 	"github.com/projectbluefin/chairlift/internal/ubluehelper"
 	"github.com/projectbluefin/chairlift/internal/updex"
 	"github.com/projectbluefin/chairlift/internal/views/actionmsg"
-	"github.com/projectbluefin/chairlift/internal/views/bundleview"
 	"github.com/projectbluefin/chairlift/internal/views/featurestatus"
 	"github.com/projectbluefin/chairlift/internal/views/pageview"
 
@@ -361,6 +360,8 @@ func (uh *UserHome) buildBluefinGroups(page *adw.PreferencesPage) bool {
 		status.CanSwitchTo != imageinfo.ChannelUnknown, status.Developer,
 		dxEnabled, gamingEnabled)
 
+	uh.buildSetupActivity(page)
+
 	// Optional user tools remain discoverable even without installed access
 	// actions; the privileged switch stays insensitive and explains why.
 	if dxEnabled {
@@ -380,7 +381,8 @@ func (uh *UserHome) buildDeveloperGroup(page *adw.PreferencesPage, status ublue.
 
 	presentation := pageview.DeveloperRow(status.Developer)
 
-	row := adw.NewActionRow()
+	row := adw.NewExpanderRow()
+	row.SetUseMarkup(false)
 	row.SetTitle(presentation.Title)
 	row.SetSubtitle(presentation.Subtitle)
 	uh.developerSpinner = newActivitySpinner()
@@ -391,6 +393,7 @@ func (uh *UserHome) buildDeveloperGroup(page *adw.PreferencesPage, status ublue.
 	toggle = newGuardedSwitch(status.Developer, func(state bool) {
 		uh.onDeveloperToggled(state, toggle, dxRow)
 	})
+	SetAccessibleLabel(toggle.widget, presentation.Title)
 	uh.developerCanToggle = status.Supports(ubluehelper.CommandDXEnable, ubluehelper.CommandDXDisable)
 	if !uh.developerCanToggle {
 		toggle.widget.SetSensitive(false)
@@ -398,13 +401,15 @@ func (uh *UserHome) buildDeveloperGroup(page *adw.PreferencesPage, status ublue.
 	}
 
 	row.AddSuffix(&toggle.widget.Widget)
-	row.SetActivatableWidget(&toggle.widget.Widget)
+	uh.addDeveloperContents(row)
 	group.Add(&row.Widget)
 
 	page.Add(group)
 	uh.developerGroup = group
 	uh.developerRow = row
 	uh.developerSwitch = toggle.widget
+	uh.developerToggle = toggle
+	uh.developerEnabled = status.Developer
 	uh.buildDeveloperOptions(group, status)
 }
 
@@ -413,7 +418,8 @@ func (uh *UserHome) buildGamingGroup(page *adw.PreferencesPage) {
 	group.SetTitle("Gaming")
 	group.SetDescription("Apps for playing games on this computer.")
 
-	row := adw.NewActionRow()
+	row := adw.NewExpanderRow()
+	row.SetUseMarkup(false)
 	row.SetTitle(pageview.GamingRow(false, 0, 0).Title)
 	row.SetSubtitle(pageview.GamingCheckingSubtitle)
 	uh.gamingSpinner = newActivitySpinner()
@@ -428,10 +434,13 @@ func (uh *UserHome) buildGamingGroup(page *adw.PreferencesPage) {
 		}
 		uh.onGamingToggled(true, toggle, gamingRow)
 	})
+	SetAccessibleLabel(toggle.widget, row.GetTitle())
 	toggle.widget.SetSensitive(false)
 
 	row.AddSuffix(&toggle.widget.Widget)
-	row.SetActivatableWidget(&toggle.widget.Widget)
+	for _, component := range gaming.Components() {
+		addSetupContents(row, component.Name, component.Description+" · System Flatpak")
+	}
 	group.Add(&row.Widget)
 	page.Add(group)
 	uh.gamingGroup, uh.gamingRow = group, row
@@ -452,252 +461,91 @@ func (uh *UserHome) buildGamingGroup(page *adw.PreferencesPage) {
 }
 
 // onDeveloperToggled grants or withdraws this account's developer access.
-func (uh *UserHome) onDeveloperToggled(enabled bool, toggle *guardedSwitch, row *adw.ActionRow) {
+func (uh *UserHome) onDeveloperToggled(enabled bool, toggle *guardedSwitch, row *adw.ExpanderRow) {
+	uh.runDeveloperToggle(enabled, toggle, row, false)
+}
+
+func (uh *UserHome) runDeveloperToggle(enabled bool, toggle *guardedSwitch, row *adw.ExpanderRow, retry bool) {
 	if !uh.developerCanToggle || !uh.developerGate.TryStart() {
+		sgtk.RunOnMainThread(func() { toggle.set(uh.developerEnabled) })
 		return
 	}
+	request := devsetup.Request{Developer: uh.developerEnabled, ChangeDeveloper: enabled != uh.developerEnabled, EnableDeveloper: enabled, Preview: dryrun.Enabled()}
+	tasks := uh.developerPostTasks(enabled, request.ChangeDeveloper || retry)
+	if !uh.setupActivity.begin(row.GetTitle(), setupStages(request.ChangeDeveloper, tasks), retry, func() {
+		uh.runDeveloperToggle(enabled, toggle, row, true)
+	}) {
+		uh.developerGate.Reset()
+		sgtk.RunOnMainThread(func() { toggle.set(uh.developerEnabled) })
+		return
+	}
+	previous := uh.setupActivity.completed
+	before := row.GetSubtitle()
 	uh.setDeveloperSensitive(false)
 	setActivitySpinner(uh.developerSpinner, true)
-
 	go func() {
-		dispatched := false
-		defer func() {
-			if !dispatched {
-				uh.developerGate.Reset()
-			}
-		}()
-
-		ctx, cancel := ublue.DefaultContext()
-		defer cancel()
-
-		skipped, err := ublue.SetDeveloperMode(ctx, enabled)
-		succeeded := err == nil
-
+		ctx := context.Background()
+		var skipped []string
 		var menuErr error
-		if succeeded {
-			menuErr = devmenu.Apply(ctx, enabled)
-			if menuErr != nil {
-				log.Printf("views: updating custom command menu: %v", menuErr)
-			}
+		var grantSucceeded bool
+		result := devsetup.Run(ctx, request, func() error {
+			helperCtx, cancel := ublue.DefaultContext()
+			defer cancel()
+			var err error
+			skipped, err = ublue.SetDeveloperMode(helperCtx, enabled)
+			grantSucceeded = err == nil
+			return err
+		}, tasks, previous, uh.developerSetupReport(enabled))
+		if grantSucceeded {
+			menuCtx, cancel := ublue.DefaultContext()
+			menuErr = devmenu.Apply(menuCtx, enabled)
+			cancel()
 		}
-
-		dispatched = true
 		sgtk.RunOnMainThread(func() {
 			defer uh.developerGate.Reset()
 			setActivitySpinner(uh.developerSpinner, false)
-			uh.setDeveloperSensitive(true)
-
-			if err != nil {
-				toggle.set(!enabled)
-				log.Printf("views: changing Developer Mode failed: %v", err)
-				uh.toastAdder.ShowErrorToast(pkexec.UserMessage(err, "Couldn't change Developer Mode. Try again."))
-				return
-			}
-			if menuErr != nil {
-				uh.toastAdder.ShowErrorToast("Couldn't update the developer entries in the top bar menu.")
-			}
-
-			decision := actionmsg.DeveloperMode(dryrun.Enabled(), enabled, skipped)
-			toggle.set(decision.Confirm == enabled)
-			if decision.Confirm {
+			uh.developerEnabled = result.Developer
+			toggle.set(result.Developer)
+			row.SetSubtitle(before)
+			if !request.Preview && request.ChangeDeveloper && result.Developer == enabled {
 				row.SetSubtitle(pageview.DeveloperResultSubtitle(enabled))
 			}
-			uh.toastAdder.ShowToast(decision.Toast)
-
-			uh.openDeveloperOnboarding(enabled, succeeded)
-			uh.startDeveloperFeedSetup(enabled, succeeded)
-			uh.startDeveloperAppsSetup(enabled, succeeded)
-			uh.startDeveloperDevcontainerSetup(enabled, succeeded)
+			uh.setupActivity.finish(result, request.Preview)
+			uh.setDeveloperSensitive(true)
+			if menuErr != nil {
+				log.Printf("views: updating custom command menu: %v", menuErr)
+				uh.toastAdder.ShowErrorToast("Couldn't update the developer entries in the top bar menu.")
+			}
+			if result.Promoted {
+				uh.openDeveloperOnboarding(true, true)
+			}
+			if !request.Preview && len(result.Completed) > 0 {
+				uh.homebrewInventoryChanged()
+			}
+			if result.Err != nil {
+				log.Printf("views: developer setup failed: %v", result.Err)
+				message := "Couldn't change Developer Mode. Try again."
+				if result.Developer && enabled {
+					message = "Developer access is enabled, but tool setup needs attention. Retry the failed steps."
+				}
+				uh.toastAdder.ShowErrorToast(pkexec.UserMessage(result.Err, message))
+				return
+			}
+			uh.toastAdder.ShowToast(actionmsg.DeveloperMode(request.Preview, enabled, skipped).Toast)
 		})
 	}()
 }
 
-// openDeveloperOnboarding opens the developer onboarding page for a confirmed
-// live enable, and runs on the GTK main thread from the one branch of
-// onDeveloperToggled that reached a successful promotion.
+// openDeveloperOnboarding opens only after the original helper grants access.
 func (uh *UserHome) openDeveloperOnboarding(enabled, succeeded bool) {
 	for _, link := range pageview.DeveloperOnboardingTargets(dryrun.Enabled(), enabled, succeeded) {
 		uh.openURL(link.URL)
 	}
 }
 
-// startDeveloperFeedSetup runs the optional developer feed work for a
-// confirmed live enable: install the Pulp reader and stage the curated OPML
-// catalog, each only when `dx_group` asks for it. Like openDeveloperOnboarding
-// it is called from the one branch of onDeveloperToggled that reached a
-// successful live promotion, so a page restore, a failed helper call, a
-// disable, and a preview all reach the empty plan and spawn nothing.
-//
-// The optional steps are deliberately not part of the enable's own outcome.
-// Developer access is granted by the privileged helper; an install that then
-// fails is reported as its own failure and rolls nothing back, because
-// withdrawing the groups the user asked for over an unrelated Flatpak would
-// be a second, unrequested change.
-//
-// Everything the worker reads is captured here, on the main thread, before it
-// starts: the plan is a value, and no widget is touched off the main thread.
-// The one widget-adjacent call is the toast, which is marshalled back through
-// sgtk.RunOnMainThread and nil-guarded — this window's group may have been
-// rebuilt or dismissed while a Flatpak install was running.
-func (uh *UserHome) startDeveloperFeedSetup(enabled, succeeded bool) {
-	var installPulp, stageFeeds bool
-	if group := uh.config.GetGroupConfig("features_page", "dx_group"); group != nil {
-		installPulp, stageFeeds = group.InstallPulp, group.StageFeeds
-	}
-
-	setup := actionmsg.DeveloperFeedSetupPlan(dryrun.Enabled(), enabled, succeeded, installPulp, stageFeeds)
-	if !setup.Any() {
-		return
-	}
-
-	// Overlapping setup runs are refused rather than queued: two concurrent
-	// `flatpak install` calls for the same application are one too many, and
-	// the work left by the run already in flight is the same work.
-	if !uh.developerFeedGate.TryStart() {
-		return
-	}
-
-	go func() {
-		var outcome actionmsg.DeveloperFeedOutcome
-
-		if setup.InstallPulp {
-			if err := developerfeeds.Provision(); err != nil {
-				log.Printf("views: developer feed setup could not provision %s: %v", developerfeeds.PulpID, err)
-			} else {
-				outcome.PulpReady = true
-			}
-		}
-
-		if setup.StageFeeds {
-			if err := developerfeeds.StageOPML(); err != nil {
-				log.Printf("views: developer feed setup could not stage the feed catalog: %v", err)
-			} else {
-				outcome.FeedsStaged = true
-				// The path is only for the banner. A home directory that
-				// cannot be resolved after a successful write costs the
-				// message its exact location, not the feedback.
-				if path, err := developerfeeds.OPMLPath(); err == nil {
-					outcome.StagedPath = path
-				}
-			}
-		}
-
-		sgtk.RunOnMainThread(func() {
-			defer uh.developerFeedGate.Reset()
-
-			if uh.toastAdder == nil {
-				return
-			}
-			result := actionmsg.DeveloperFeedFeedback(setup, outcome)
-			if result.Failed {
-				uh.toastAdder.ShowErrorToast(result.Message)
-				return
-			}
-			uh.toastAdder.ShowToast(result.Message)
-		})
-	}()
-}
-
-// startDeveloperAppsSetup installs the developer app collection
-// (dakota-dev-flatpaks) after a confirmed live Developer Mode enable, only
-// when `dx_group` opts in with install_dev_apps and the App collections group
-// is available — the same config and Homebrew capability floor the Apps page
-// uses, so a host without Homebrew never attempts the install.
-func (uh *UserHome) startDeveloperAppsSetup(enabled, succeeded bool) {
-	var installDevApps bool
-	if group := uh.config.GetGroupConfig("features_page", "dx_group"); group != nil {
-		installDevApps = group.InstallDevApps
-	}
-	collectionsAvailable := uh.collectionsAvailable()
-	if !actionmsg.DeveloperAppsSetupPlan(dryrun.Enabled(), enabled, succeeded, installDevApps, collectionsAvailable) {
-		return
-	}
-
-	var bundlePaths []string
-	if groupCfg := uh.config.GetGroupConfig("applications_page", "brew_bundles_group"); groupCfg != nil {
-		bundlePaths = append(bundlePaths, groupCfg.BundlesPaths...)
-	}
-
-	if !uh.developerAppsGate.TryStart() {
-		return
-	}
-
-	go func() {
-		defer uh.developerAppsGate.Reset()
-		bundles, err := homebrew.AvailableBundles(bundlePaths)
-		if err != nil {
-			log.Printf("views: developer apps setup could not discover bundles: %v", err)
-			return
-		}
-		var devAppsBrewfile string
-		for _, b := range bundles {
-			if b.Name == bundleview.DeveloperAppsCollection {
-				devAppsBrewfile = b.Path
-				break
-			}
-		}
-		if devAppsBrewfile == "" {
-			return
-		}
-
-		if err := homebrew.BundleInstall(devAppsBrewfile); err != nil {
-			log.Printf("views: developer apps setup could not install %s: %v", devAppsBrewfile, err)
-			sgtk.RunOnMainThread(func() {
-				if uh.toastAdder != nil {
-					uh.toastAdder.ShowErrorToast("Couldn't install developer apps.")
-				}
-			})
-			return
-		}
-		sgtk.RunOnMainThread(func() {
-			if uh.toastAdder != nil {
-				uh.toastAdder.ShowToast("Developer apps installed")
-			}
-			uh.homebrewInventoryChanged()
-		})
-	}()
-}
-
-// startDeveloperDevcontainerSetup automatically installs the Dev Container CLI
-// (devcontainer) after a confirmed Developer Mode enable. Like
-// startDeveloperFeedSetup, it is called from the one branch of
-// onDeveloperToggled that reached a successful promotion, so a page restore,
-// a failed helper call, and a disable spawn nothing. A dry-run enable reaches
-// homebrew.Install, whose own dry-run gate logs the brew command it would run
-// instead of executing it. An install error reports its own failure and rolls
-// nothing back.
-func (uh *UserHome) startDeveloperDevcontainerSetup(enabled, succeeded bool) {
-	if !uh.capabilities[capability.Homebrew] || !enabled || !succeeded {
-		return
-	}
-
-	if !uh.developerDevcontainerGate.TryStart() {
-		return
-	}
-
-	go func() {
-		err := homebrew.Install("devcontainer", false)
-		sgtk.RunOnMainThread(func() {
-			defer uh.developerDevcontainerGate.Reset()
-
-			if err != nil {
-				log.Printf("views: developer devcontainer setup failed: %v", err)
-				if uh.toastAdder != nil {
-					uh.toastAdder.ShowErrorToast("Couldn't install Dev Container CLI.")
-				}
-				return
-			}
-
-			if !dryrun.Enabled() {
-				uh.homebrewInventoryChanged()
-			}
-		})
-	}()
-}
-
-func (uh *UserHome) confirmGamingDisable(toggle *guardedSwitch, row *adw.ActionRow) {
+func (uh *UserHome) confirmGamingDisable(toggle *guardedSwitch, row *adw.ExpanderRow) {
 	if !uh.gamingGate.TryStart() {
-		toggle.set(true)
+		sgtk.RunOnMainThread(func() { toggle.set(true) })
 		return
 	}
 	dialog := adw.NewAlertDialog("Turn Off Gaming Mode?", "Gaming tools are removed wherever they are installed: system-wide copies for every account on this computer, and copies installed only for your account. Steam, ProtonUp-Qt, and Flatseal left over from an earlier Gaming Mode are removed too. Tools that came with the system are left in place. Game data is kept.")
@@ -718,14 +566,30 @@ func (uh *UserHome) confirmGamingDisable(toggle *guardedSwitch, row *adw.ActionR
 }
 
 // onGamingToggled installs or removes the gaming tools stack.
-func (uh *UserHome) onGamingToggled(enabled bool, toggle *guardedSwitch, row *adw.ActionRow) {
+func (uh *UserHome) onGamingToggled(enabled bool, toggle *guardedSwitch, row *adw.ExpanderRow) {
 	if !uh.gamingGate.TryStart() {
+		active := toggle.widget.GetState()
+		sgtk.RunOnMainThread(func() { toggle.set(active) })
 		return
 	}
 	uh.onGamingToggledConfirmed(enabled, toggle, row)
 }
 
-func (uh *UserHome) onGamingToggledConfirmed(enabled bool, toggle *guardedSwitch, row *adw.ActionRow) {
+func (uh *UserHome) onGamingToggledConfirmed(enabled bool, toggle *guardedSwitch, row *adw.ExpanderRow) {
+	uh.runGamingConfirmed(enabled, toggle, row, false)
+}
+
+func (uh *UserHome) runGamingConfirmed(enabled bool, toggle *guardedSwitch, row *adw.ExpanderRow, retry bool) {
+	beforeActive := toggle.widget.GetState()
+	if !uh.setupActivity.begin(row.GetTitle(), []devsetup.Stage{devsetup.Tools, devsetup.Verify}, retry, func() {
+		if uh.gamingGate.TryStart() {
+			uh.runGamingConfirmed(enabled, toggle, row, true)
+		}
+	}) {
+		uh.gamingGate.Reset()
+		sgtk.RunOnMainThread(func() { toggle.set(beforeActive) })
+		return
+	}
 	toggle.widget.SetSensitive(false)
 	before := row.GetSubtitle()
 	row.SetSubtitle(pageview.GamingWorkingSubtitle(enabled))
@@ -733,24 +597,39 @@ func (uh *UserHome) onGamingToggledConfirmed(enabled bool, toggle *guardedSwitch
 
 	go func() {
 		progressCb := func(step, total int, name string) {
+			uh.setupActivity.detail(pageview.GamingWorkingStepSubtitle(enabled, step, total, name))
 			sgtk.RunOnMainThread(func() {
 				row.SetSubtitle(pageview.GamingWorkingStepSubtitle(enabled, step, total, name))
 			})
 		}
 		var changed, kept []string
 		var failures []error
-		if enabled {
-			changed, failures = gaming.EnableWithProgress(progressCb)
-		} else {
-			changed, kept, failures = gaming.DisableWithProgress(progressCb)
-		}
+		var state gaming.State
+		var refreshErr error
+		preview := dryrun.Enabled()
+		setupResult := devsetup.Run(context.Background(), devsetup.Request{Preview: preview}, nil, []devsetup.Task{
+			{Stage: devsetup.Tools, Run: func() error {
+				if enabled {
+					changed, failures = gaming.EnableWithProgress(progressCb)
+				} else {
+					changed, kept, failures = gaming.DisableWithProgress(progressCb)
+				}
+				return errors.Join(failures...)
+			}},
+			{Stage: devsetup.Verify, Run: func() error {
+				state, refreshErr = gaming.Status()
+				if refreshErr == nil && !preview && enabled && !state.Enabled {
+					return errors.New("gaming tools are not ready")
+				}
+				return refreshErr
+			}},
+		}, nil, uh.setupActivity.report)
 		for _, failure := range failures {
 			log.Printf("views: gaming component failed: %v", failure)
 		}
 		for _, id := range kept {
 			log.Printf("views: gaming component %s came with the system; its system-wide copy was left in place", id)
 		}
-		state, refreshErr := gaming.Status()
 		if refreshErr != nil {
 			log.Printf("views: gaming refresh failed: %v", refreshErr)
 		}
@@ -759,10 +638,11 @@ func (uh *UserHome) onGamingToggledConfirmed(enabled bool, toggle *guardedSwitch
 			defer uh.gamingGate.Reset()
 			setActivitySpinner(uh.gamingSpinner, false)
 			toggle.widget.SetSensitive(true)
+			uh.setupActivity.finish(setupResult, preview)
 
 			decision := actionmsg.GamingMode(dryrun.Enabled(), enabled, len(changed), len(failures), len(kept))
-			active := decision.Confirm == enabled
-			if refreshErr == nil {
+			active := beforeActive
+			if !preview && refreshErr == nil {
 				active = state.Enabled
 			}
 			toggle.set(active)
@@ -783,6 +663,8 @@ func (uh *UserHome) onGamingToggledConfirmed(enabled bool, toggle *guardedSwitch
 			}
 			if len(failures) > 0 {
 				uh.toastAdder.ShowErrorToast(decision.Toast)
+			} else if setupResult.Err != nil {
+				uh.toastAdder.ShowErrorToast("Couldn't verify Gaming Mode. Check Setup activity and try again.")
 			} else {
 				uh.toastAdder.ShowToast(decision.Toast)
 			}
